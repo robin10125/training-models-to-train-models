@@ -19,13 +19,13 @@ The default task is `Ant-v5` from Gymnasium/MuJoCo. Ant locomotion is a lightwei
 Use a virtual environment:
 
 ```bash
-cd /home/robin/Downloads/eureka-lite
+cd eureka-lite
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 ```
 
-Install PyTorch for CUDA first. With your current NVIDIA driver, the CUDA 12.1 wheel is a reasonable starting point:
+Install PyTorch first. For CUDA-enabled systems, choose the wheel that matches the local CUDA/driver setup. For example:
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu121
@@ -65,7 +65,7 @@ The script writes results to `runs/`, including:
 
 ## RLVR Experiment Notes
 
-See [docs/rlvr_eureka_experiment.md](docs/rlvr_eureka_experiment.md) for the current RLVR/EUREKA experiment assumptions. In short: the mock generator remains available for fast tests, the HF backend can use a real coding model, and the verified reward signal is true environment return.
+See [docs/rlvr_eureka_experiment.md](docs/rlvr_eureka_experiment.md) for the RLVR/EUREKA experiment assumptions. In short: the mock generator remains available for fast tests, the HF backend can use a real coding model, and the verified reward signal is true environment return.
 
 The mock generator can be replaced with the HF backend:
 
@@ -76,7 +76,7 @@ python -m eureka_lite --task Ant-v5 --generator hf --population 1 --generations 
 Resume interrupted serious runs with:
 
 ```bash
-python -m eureka_lite --resume --output-dir runs/your_run
+python -m eureka_lite --resume --output-dir runs/example_run
 ```
 
 Train a first RLVR LoRA adapter from collected records:
@@ -84,8 +84,8 @@ Train a first RLVR LoRA adapter from collected records:
 ```bash
 python -m eureka_lite.rlvr_trainer \
   --algorithm grpo \
-  --records runs/your_run/rlvr_records.jsonl \
-  --output-dir runs/your_adapter \
+  --records runs/example_run/rlvr_records.jsonl \
+  --output-dir runs/example_adapter \
   --model-id Qwen/Qwen2.5-Coder-3B-Instruct
 ```
 
