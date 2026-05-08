@@ -1,0 +1,12 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local environment
+.venv/
+
+# Editable install metadata
+*.egg-info/
+
+# Generated experiment outputs
+runs/

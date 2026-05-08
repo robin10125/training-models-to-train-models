@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eureka-lite"
+version = "0.1.0"
+description = "Small EUREKA-inspired reward search for lightweight Gymnasium tasks."
+requires-python = ">=3.10"
+dependencies = [
+    "gymnasium[mujoco]>=1.0,<1.1",
+    "stable-baselines3>=2.3,<3",
+    "numpy>=1.26",
+    "rich>=13.7",
+    "transformers>=4.51",
+    "accelerate>=1.0",
+    "bitsandbytes>=0.45",
+    "peft>=0.13",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

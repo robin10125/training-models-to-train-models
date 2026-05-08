@@ -1,0 +1,8 @@
+gymnasium[mujoco]>=1.0,<1.1
+stable-baselines3>=2.3,<3
+numpy>=1.26
+rich>=13.7
+transformers>=4.51
+accelerate>=1.0
+bitsandbytes>=0.45
+peft>=0.13
