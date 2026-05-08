@@ -19,7 +19,6 @@ The default task is `Ant-v5` from Gymnasium/MuJoCo. Ant locomotion is a lightwei
 Use a virtual environment:
 
 ```bash
-cd eureka-lite
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -40,14 +39,6 @@ pip install -r requirements.txt
 ```
 
 ## Run
-
-Quick smoke run:
-
-```bash
-python -m eureka_lite --task Ant-v5 --generations 1 --population 2 --timesteps 5000 --eval-episodes 2 --device auto
-```
-
-More useful local run:
 
 ```bash
 python -m eureka_lite --task Ant-v5 --generations 3 --population 4 --timesteps 50000 --eval-episodes 5 --device auto
@@ -88,7 +79,3 @@ python -m eureka_lite.rlvr_trainer \
   --output-dir runs/example_adapter \
   --model-id Qwen/Qwen2.5-Coder-3B-Instruct
 ```
-
-## Practical Limits
-
-This is not a full reproduction of NVIDIA EUREKA. It intentionally avoids Isaac Gym and humanoid or dexterous-hand workloads. MuJoCo Ant is CPU-simulation-heavy, so `--device auto` or even `--device cpu` can be faster than forcing CUDA for small PPO runs.
