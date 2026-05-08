@@ -1,13 +1,16 @@
 # eureka-lite
 
-Small EUREKA-inspired reward search for local development.
+Small EUREKA-inspired RLVR experiment for local development.
 
-NVIDIA's EUREKA project uses an LLM to generate reward functions, trains policies in simulation, evaluates them, then iterates on the reward code. This repo implements the same core loop at toy scale:
+The purpose of this experiment is to train the coding model that generates EUREKA reward code. Generated reward functions are treated as model completions; downstream RL performance is used as the verified reward signal; and those verified rewards are used to update the base coding model with LoRA/GRPO-style RLVR.
+
+NVIDIA's EUREKA project uses an LLM to generate reward functions, trains policies in simulation, evaluates them, then iterates on the reward code. This repo keeps that loop small enough for local development and adds the model-training side:
 
 1. Generate a population of dense reward candidates.
 2. Train a PPO policy for each candidate.
 3. Evaluate each policy using the real environment reward.
-4. Keep the best candidate and mutate it for the next round.
+4. Store the generator prompt, completion tokens, old logprobs, and verified return as RLVR data.
+5. Update the reward-code-generating base model from those records.
 
 The default task is `Ant-v5` from Gymnasium/MuJoCo. Ant locomotion is a lightweight local analogue of EUREKA-style robot reward design: generated rewards train the agent, while true environment return verifies whether the generated reward helped.
 
