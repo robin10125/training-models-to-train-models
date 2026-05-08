@@ -1,4 +1,4 @@
-# eureka-lite
+# Training Models to Train Models
 
 Small EUREKA-inspired RLVR experiment for local development.
 
