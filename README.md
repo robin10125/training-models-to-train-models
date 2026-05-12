@@ -79,3 +79,28 @@ python -m eureka_lite.rlvr_trainer \
   --output-dir runs/example_adapter \
   --model-id Qwen/Qwen2.5-Coder-3B-Instruct
 ```
+
+## Batched GPU Ant Simulation
+
+The default PPO search path uses Gymnasium/SB3 environments. To exercise many
+Ant physics worlds in parallel on an NVIDIA GPU, install the optional MuJoCo
+Warp dependency:
+
+```bash
+pip install -e ".[mjwarp]"
+```
+
+Run a batched Ant simulation smoke test:
+
+```bash
+python -m eureka_lite.mjwarp_ant \
+  --worlds 4096 \
+  --steps 1000 \
+  --device cuda:0 \
+  --action-mode random-once
+```
+
+This uses MuJoCo Warp for GPU physics and reports world-steps per second. It is
+currently a batched simulation/benchmark path, not a drop-in replacement for the
+SB3 PPO training loop. Building training on top of it requires a custom rollout
+and policy-update loop that consumes the batched device state directly.
