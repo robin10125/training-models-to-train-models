@@ -16,6 +16,7 @@ DEFAULT_HF_MODEL_ID = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
 @dataclass(frozen=True)
 class HfGeneratorConfig:
     model_id: str = DEFAULT_HF_MODEL_ID
+    adapter_path: str | None = None
     max_new_tokens: int = 256
     temperature: float = 0.7
     top_p: float = 0.95
@@ -50,7 +51,16 @@ class HfRewardGenerator:
             torch_dtype=torch.bfloat16,
             quantization_config=quantization_config,
         )
+        if config.adapter_path:
+            try:
+                from peft import PeftModel
+            except ImportError as exc:
+                raise RuntimeError("Loading a generator adapter requires peft.") from exc
+            self.model = PeftModel.from_pretrained(self.model, config.adapter_path)
         self.model.eval()
+        self.generator_checkpoint = (
+            config.model_id if config.adapter_path is None else f"{config.model_id}+adapter:{config.adapter_path}"
+        )
 
     def generate_population(
         self,
@@ -127,7 +137,7 @@ class HfRewardGenerator:
                 weights={},
                 generation=generation,
                 generator_type="hf",
-                generator_checkpoint=self.config.model_id,
+                generator_checkpoint=self.generator_checkpoint,
                 completion_token_ids=completion_token_ids,
                 old_logprobs=old_logprobs,
             )

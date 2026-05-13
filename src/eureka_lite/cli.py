@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("runs/latest"))
     parser.add_argument("--generator", default="mock", choices=["mock", "hf"])
     parser.add_argument("--model-id", default=DEFAULT_HF_MODEL_ID)
+    parser.add_argument("--adapter-path", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
@@ -77,6 +78,7 @@ def main() -> None:
         output_dir=args.output_dir,
         generator=args.generator,
         model_id=args.model_id,
+        adapter_path=args.adapter_path,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,

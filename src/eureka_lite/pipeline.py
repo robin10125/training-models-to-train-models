@@ -16,8 +16,8 @@ from .search import run_search
 class FullPipelineConfig:
     task: str
     model_id: str
-    collection_output_dir: str
-    adapter_output_dir: str
+    run_root: str
+    iterations: int
     population: int
     generations: int
     worlds_per_candidate: int
@@ -48,83 +48,121 @@ class FullPipelineConfig:
 
 def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
     started_at = time.monotonic()
-    collection_dir = Path(config.collection_output_dir)
-    adapter_dir = Path(config.adapter_output_dir)
-    pipeline_state_path = collection_dir / "pipeline_state.json"
+    run_root = Path(config.run_root)
+    run_root.mkdir(parents=True, exist_ok=True)
+    pipeline_state_path = run_root / "pipeline_state.json"
 
-    collection_resume = (collection_dir / "checkpoint.json").exists() and not config.overwrite_collection
-    results = run_search(
-        task=config.task,
-        generations=config.generations,
-        population=config.population,
-        timesteps=1,
-        eval_episodes=config.eval_episodes,
-        n_envs=1,
-        seed=config.seed,
-        device=config.device,
-        output_dir=collection_dir,
-        generator="hf",
-        model_id=config.model_id,
-        max_new_tokens=config.max_new_tokens,
-        temperature=config.temperature,
-        top_p=config.top_p,
-        load_in_4bit=config.load_in_4bit,
-        sim_backend="mjwarp",
-        worlds_per_candidate=config.worlds_per_candidate,
-        mjwarp_episode_steps=config.mjwarp_episode_steps,
-        mjwarp_policy_iterations=config.mjwarp_policy_iterations,
-        mjwarp_elite_frac=config.mjwarp_elite_frac,
-        resume=collection_resume,
-        overwrite=config.overwrite_collection,
-    )
-
-    records_path = collection_dir / "rlvr_records.jsonl"
-    if not records_path.exists() or records_path.stat().st_size == 0:
-        raise FileNotFoundError(f"Collection did not produce RLVR records at {records_path}")
-
-    metrics_path = adapter_dir / "trainer_metrics.json"
-    if metrics_path.exists() and not config.force_train:
-        trainer_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        trainer_status = "skipped_existing_adapter"
-    else:
-        trainer_metrics = train_rlvr(
-            RlvrTrainerConfig(
-                records_path=str(records_path),
-                output_dir=str(adapter_dir),
-                model_id=config.model_id,
-                max_length=config.trainer_max_length,
-                epochs=config.trainer_epochs,
-                batch_size=config.trainer_batch_size,
-                learning_rate=config.trainer_learning_rate,
-                max_grad_norm=config.trainer_max_grad_norm,
-                lora_r=config.trainer_lora_r,
-                lora_alpha=config.trainer_lora_alpha,
-                lora_dropout=config.trainer_lora_dropout,
-                load_in_4bit=config.load_in_4bit,
-                algorithm=config.trainer_algorithm,
-                clip_epsilon=config.trainer_clip_epsilon,
-                beta_kl=config.trainer_beta_kl,
-            )
+    adapter_path: str | None = None
+    iteration_summaries = []
+    for iteration in range(config.iterations):
+        collection_dir = run_root / f"iteration_{iteration:03d}" / "collection"
+        adapter_dir = run_root / f"iteration_{iteration:03d}" / "adapter"
+        collection_resume = (collection_dir / "checkpoint.json").exists() and not config.overwrite_collection
+        results = run_search(
+            task=config.task,
+            generations=config.generations,
+            population=config.population,
+            timesteps=1,
+            eval_episodes=config.eval_episodes,
+            n_envs=1,
+            seed=config.seed + iteration * 10_000,
+            device=config.device,
+            output_dir=collection_dir,
+            generator="hf",
+            model_id=config.model_id,
+            adapter_path=adapter_path,
+            max_new_tokens=config.max_new_tokens,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            load_in_4bit=config.load_in_4bit,
+            sim_backend="mjwarp",
+            worlds_per_candidate=config.worlds_per_candidate,
+            mjwarp_episode_steps=config.mjwarp_episode_steps,
+            mjwarp_policy_iterations=config.mjwarp_policy_iterations,
+            mjwarp_elite_frac=config.mjwarp_elite_frac,
+            resume=collection_resume,
+            overwrite=config.overwrite_collection,
         )
-        trainer_status = "trained"
 
-    summary = {
-        "config": asdict(config),
-        "collection_output_dir": collection_dir.as_posix(),
-        "adapter_output_dir": adapter_dir.as_posix(),
-        "records_path": records_path.as_posix(),
-        "collection_results": len(results),
-        "best_verified_reward": max(
+        records_path = collection_dir / "rlvr_records.jsonl"
+        if not records_path.exists() or records_path.stat().st_size == 0:
+            raise FileNotFoundError(f"Collection did not produce RLVR records at {records_path}")
+
+        metrics_path = adapter_dir / "trainer_metrics.json"
+        if metrics_path.exists() and not config.force_train:
+            trainer_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            trainer_status = "skipped_existing_adapter"
+        else:
+            trainer_metrics = train_rlvr(
+                RlvrTrainerConfig(
+                    records_path=str(records_path),
+                    output_dir=str(adapter_dir),
+                    model_id=config.model_id,
+                    adapter_path=adapter_path,
+                    max_length=config.trainer_max_length,
+                    epochs=config.trainer_epochs,
+                    batch_size=config.trainer_batch_size,
+                    learning_rate=config.trainer_learning_rate,
+                    max_grad_norm=config.trainer_max_grad_norm,
+                    lora_r=config.trainer_lora_r,
+                    lora_alpha=config.trainer_lora_alpha,
+                    lora_dropout=config.trainer_lora_dropout,
+                    load_in_4bit=config.load_in_4bit,
+                    algorithm=config.trainer_algorithm,
+                    clip_epsilon=config.trainer_clip_epsilon,
+                    beta_kl=config.trainer_beta_kl,
+                )
+            )
+            trainer_status = "trained"
+
+        best_verified_reward = max(
             (result.mean_reward for result in results if result.mean_reward is not None),
             default=None,
+        )
+        iteration_summaries.append(
+            {
+                "iteration": iteration,
+                "collection_output_dir": collection_dir.as_posix(),
+                "adapter_output_dir": adapter_dir.as_posix(),
+                "records_path": records_path.as_posix(),
+                "generator_adapter_path": adapter_path,
+                "collection_results": len(results),
+                "best_verified_reward": best_verified_reward,
+                "trainer_status": trainer_status,
+                "trainer_final_loss": trainer_metrics.get("final_loss"),
+            }
+        )
+        adapter_path = adapter_dir.as_posix()
+        summary = build_pipeline_summary(config, iteration_summaries, started_at)
+        pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    summary = build_pipeline_summary(config, iteration_summaries, started_at)
+    pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
+def build_pipeline_summary(
+    config: FullPipelineConfig,
+    iteration_summaries: list[dict[str, Any]],
+    started_at: float,
+) -> dict[str, Any]:
+    summary = {
+        "config": asdict(config),
+        "run_root": config.run_root,
+        "iterations_completed": len(iteration_summaries),
+        "iterations": iteration_summaries,
+        "latest_adapter_output_dir": iteration_summaries[-1]["adapter_output_dir"] if iteration_summaries else None,
+        "best_verified_reward": max(
+            (
+                item["best_verified_reward"]
+                for item in iteration_summaries
+                if item["best_verified_reward"] is not None
+            ),
+            default=None,
         ),
-        "trainer_status": trainer_status,
-        "trainer_final_loss": trainer_metrics.get("final_loss"),
         "elapsed_seconds": time.monotonic() - started_at,
         "updated_at": time.time(),
     }
-    collection_dir.mkdir(parents=True, exist_ok=True)
-    pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 
 
@@ -132,8 +170,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the full MJWarp EUREKA collection + RLVR training pipeline.")
     parser.add_argument("--task", default="Ant-v5", choices=["Ant-v5"])
     parser.add_argument("--model-id", default=DEFAULT_HF_MODEL_ID)
-    parser.add_argument("--collection-output-dir", type=Path, default=Path("runs/deepseek_lite_ant_mjwarp_16x4096"))
-    parser.add_argument("--adapter-output-dir", type=Path, default=Path("runs/deepseek_lite_ant_mjwarp_grpo_adapter"))
+    parser.add_argument("--run-root", type=Path, default=Path("runs/deepseek_lite_ant_mjwarp_rlvr"))
+    parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--population", type=int, default=16)
     parser.add_argument("--generations", type=int, default=1)
     parser.add_argument("--worlds-per-candidate", type=int, default=4096)
@@ -165,13 +203,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.iterations < 1:
+        raise SystemExit("--iterations must be at least 1")
     if args.population < 2 and args.trainer_algorithm == "grpo":
         raise SystemExit("--trainer-algorithm grpo requires --population at least 2")
     config = FullPipelineConfig(
         task=args.task,
         model_id=args.model_id,
-        collection_output_dir=args.collection_output_dir.as_posix(),
-        adapter_output_dir=args.adapter_output_dir.as_posix(),
+        run_root=args.run_root.as_posix(),
+        iterations=args.iterations,
         population=args.population,
         generations=args.generations,
         worlds_per_candidate=args.worlds_per_candidate,

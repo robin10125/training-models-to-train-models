@@ -46,15 +46,16 @@ experiment can be launched with:
 ```
 
 The script creates `.venv`, installs PyTorch and `mujoco-warp`, runs a small
-CUDA/MJWarp smoke test, then launches the single-command training pipeline that
-collects a 16-candidate x 4096-world Ant EUREKA batch and trains a GRPO LoRA
-adapter from the resulting RLVR records. By default it requires a GPU with at
+CUDA/MJWarp smoke test, then launches the single-command iterative training
+pipeline. Each iteration samples 16 reward candidates, evaluates each with 4096
+Ant worlds, trains a GRPO LoRA adapter from the resulting RLVR records, and uses
+that adapter to sample the next iteration. By default it requires a GPU with at
 least 90000 MiB of VRAM. Override settings with environment variables, for
 example:
 
 ```bash
-OUTPUT_DIR=runs/my_96gb_run \
-ADAPTER_OUTPUT_DIR=runs/my_96gb_adapter \
+RUN_ROOT=runs/my_96gb_run \
+ITERATIONS=5 \
 ./scripts/run_full_mjwarp_rlvr_96gb.sh
 ```
 
@@ -130,8 +131,8 @@ Run the full MJWarp-backed EUREKA/RLVR pipeline directly after setup:
 python -m eureka_lite.pipeline \
   --task Ant-v5 \
   --model-id deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
-  --collection-output-dir runs/deepseek_lite_ant_mjwarp_16x4096 \
-  --adapter-output-dir runs/deepseek_lite_ant_mjwarp_grpo_adapter \
+  --run-root runs/deepseek_lite_ant_mjwarp_rlvr \
+  --iterations 3 \
   --population 16 \
   --generations 1 \
   --worlds-per-candidate 4096 \
@@ -148,5 +149,6 @@ python -m eureka_lite.pipeline \
 
 The MJWarp evaluator trains a batched population of simple Ant policies with
 the generated reward expression, then scores the best policy with true
-Gymnasium Ant return for the RLVR record. The pipeline then trains the GRPO LoRA
-adapter from those records and writes `pipeline_state.json`.
+Gymnasium Ant return for the RLVR record. After each iteration, the pipeline
+trains a GRPO LoRA adapter and uses it as the generator policy for the next
+iteration. It writes `pipeline_state.json` under the run root.

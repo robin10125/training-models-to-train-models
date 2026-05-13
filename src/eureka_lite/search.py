@@ -154,6 +154,7 @@ class RunConfig:
     device: str
     generator: str
     model_id: str
+    adapter_path: str | None
     max_new_tokens: int
     temperature: float
     top_p: float
@@ -178,6 +179,7 @@ def run_search(
     output_dir: Path,
     generator: str = "mock",
     model_id: str = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+    adapter_path: str | None = None,
     max_new_tokens: int = 256,
     temperature: float = 0.7,
     top_p: float = 0.95,
@@ -203,6 +205,7 @@ def run_search(
         device = checkpoint_config["device"]
         generator = checkpoint_config["generator"]
         model_id = checkpoint_config["model_id"]
+        adapter_path = checkpoint_config.get("adapter_path")
         max_new_tokens = int(checkpoint_config["max_new_tokens"])
         temperature = float(checkpoint_config["temperature"])
         top_p = float(checkpoint_config["top_p"])
@@ -224,6 +227,7 @@ def run_search(
         device=device,
         generator=generator,
         model_id=model_id,
+        adapter_path=adapter_path,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,
@@ -243,6 +247,7 @@ def run_search(
         hf_generator = HfRewardGenerator(
             HfGeneratorConfig(
                 model_id=model_id,
+                adapter_path=adapter_path,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,

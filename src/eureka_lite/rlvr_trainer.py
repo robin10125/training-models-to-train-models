@@ -28,6 +28,7 @@ class RlvrTrainerConfig:
     records_path: str
     output_dir: str
     model_id: str
+    adapter_path: str | None
     max_length: int
     epochs: int
     batch_size: int
@@ -266,7 +267,7 @@ def grpo_clipped_loss(
 
 def train_rlvr(config: RlvrTrainerConfig) -> dict[str, Any]:
     try:
-        from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+        from peft import LoraConfig, PeftModel, TaskType, get_peft_model, prepare_model_for_kbit_training
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     except ImportError as exc:
         raise RuntimeError("RLVR training requires transformers, peft, accelerate, and bitsandbytes.") from exc
@@ -303,15 +304,18 @@ def train_rlvr(config: RlvrTrainerConfig) -> dict[str, Any]:
     if config.load_in_4bit:
         model = prepare_model_for_kbit_training(model)
 
-    lora_config = LoraConfig(
-        r=config.lora_r,
-        lora_alpha=config.lora_alpha,
-        lora_dropout=config.lora_dropout,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-        target_modules="all-linear",
-    )
-    model = get_peft_model(model, lora_config)
+    if config.adapter_path:
+        model = PeftModel.from_pretrained(model, config.adapter_path, is_trainable=True)
+    else:
+        lora_config = LoraConfig(
+            r=config.lora_r,
+            lora_alpha=config.lora_alpha,
+            lora_dropout=config.lora_dropout,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+            target_modules="all-linear",
+        )
+        model = get_peft_model(model, lora_config)
     model.train()
 
     dataset = RlvrDataset(examples, tokenizer, config.max_length)
@@ -375,6 +379,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--records", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-id", default="Qwen/Qwen2.5-Coder-3B-Instruct")
+    parser.add_argument("--adapter-path", default=None)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -396,6 +401,7 @@ def main() -> None:
         records_path=str(args.records),
         output_dir=str(args.output_dir),
         model_id=args.model_id,
+        adapter_path=args.adapter_path,
         max_length=args.max_length,
         epochs=args.epochs,
         batch_size=args.batch_size,
