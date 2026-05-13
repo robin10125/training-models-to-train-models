@@ -29,6 +29,71 @@ RUN_SMOKE_TEST="${RUN_SMOKE_TEST:-1}"
 FORCE_TRAIN="${FORCE_TRAIN:-0}"
 OVERWRITE_COLLECTION="${OVERWRITE_COLLECTION:-0}"
 
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/run_full_mjwarp_rlvr_96gb.sh [options]
+
+Options:
+  --iterations N              RLVR sample/evaluate/train iterations.
+  --run-root PATH             Output directory for the iterative run.
+  --population N              Reward candidates per iteration.
+  --worlds-per-candidate N    Ant worlds per reward candidate.
+  --allow-small-gpu           Run even if GPU memory is below the 96 GB default.
+  --no-smoke-test             Skip the small MJWarp smoke test.
+  --force-train               Retrain adapters even if trainer_metrics.json exists.
+  --overwrite-collection      Replace existing collection artifacts.
+  -h, --help                  Show this help.
+
+Environment variables with the same uppercase names are still supported as defaults.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --iterations)
+      ITERATIONS="$2"
+      shift 2
+      ;;
+    --run-root)
+      RUN_ROOT="$2"
+      shift 2
+      ;;
+    --population)
+      POPULATION="$2"
+      shift 2
+      ;;
+    --worlds-per-candidate)
+      WORLDS_PER_CANDIDATE="$2"
+      shift 2
+      ;;
+    --allow-small-gpu)
+      ALLOW_SMALL_GPU=1
+      shift
+      ;;
+    --no-smoke-test)
+      RUN_SMOKE_TEST=0
+      shift
+      ;;
+    --force-train)
+      FORCE_TRAIN=1
+      shift
+      ;;
+    --overwrite-collection)
+      OVERWRITE_COLLECTION=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
 log() {
   printf '\n[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
