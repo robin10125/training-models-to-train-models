@@ -169,6 +169,50 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(second_call["adapter_path"], (run_root / "iteration_000" / "adapter").as_posix())
         self.assertEqual(summary["iterations_completed"], 2)
 
+    def test_pipeline_exits_before_new_iteration_when_pause_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run"
+            run_root.mkdir()
+            (run_root / "PAUSE").write_text("", encoding="utf-8")
+            config = FullPipelineConfig(
+                task="Ant-v5",
+                model_id="model",
+                run_root=run_root.as_posix(),
+                iterations=1,
+                population=16,
+                generations=1,
+                worlds_per_candidate=4096,
+                mjwarp_episode_steps=500,
+                mjwarp_policy_iterations=4,
+                mjwarp_elite_frac=0.1,
+                eval_episodes=5,
+                seed=7,
+                device="cuda",
+                max_new_tokens=256,
+                temperature=0.7,
+                top_p=0.95,
+                load_in_4bit=True,
+                trainer_algorithm="grpo",
+                trainer_epochs=1,
+                trainer_batch_size=1,
+                trainer_learning_rate=5e-5,
+                trainer_max_length=1024,
+                trainer_max_grad_norm=1.0,
+                trainer_lora_r=16,
+                trainer_lora_alpha=32,
+                trainer_lora_dropout=0.05,
+                trainer_clip_epsilon=0.2,
+                trainer_beta_kl=0.01,
+                overwrite_collection=False,
+                force_train=False,
+            )
+            with patch("eureka_lite.pipeline.run_search") as run_search_mock:
+                summary = run_full_pipeline(config)
+
+        self.assertEqual(summary["status"], "paused")
+        self.assertEqual(summary["iterations_completed"], 0)
+        run_search_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

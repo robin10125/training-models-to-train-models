@@ -51,10 +51,15 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
     run_root = Path(config.run_root)
     run_root.mkdir(parents=True, exist_ok=True)
     pipeline_state_path = run_root / "pipeline_state.json"
+    pause_path = run_root / "PAUSE"
 
     adapter_path: str | None = None
     iteration_summaries = []
     for iteration in range(config.iterations):
+        if pause_path.exists():
+            summary = build_pipeline_summary(config, iteration_summaries, started_at, status="paused")
+            pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            return summary
         collection_dir = run_root / f"iteration_{iteration:03d}" / "collection"
         adapter_dir = run_root / f"iteration_{iteration:03d}" / "adapter"
         collection_resume = (collection_dir / "checkpoint.json").exists() and not config.overwrite_collection
@@ -80,6 +85,7 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
             mjwarp_episode_steps=config.mjwarp_episode_steps,
             mjwarp_policy_iterations=config.mjwarp_policy_iterations,
             mjwarp_elite_frac=config.mjwarp_elite_frac,
+            pause_path=pause_path,
             resume=collection_resume,
             overwrite=config.overwrite_collection,
         )
@@ -87,6 +93,28 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
         records_path = collection_dir / "rlvr_records.jsonl"
         if not records_path.exists() or records_path.stat().st_size == 0:
             raise FileNotFoundError(f"Collection did not produce RLVR records at {records_path}")
+
+        best_verified_reward = max(
+            (result.mean_reward for result in results if result.mean_reward is not None),
+            default=None,
+        )
+        if pause_path.exists():
+            iteration_summaries.append(
+                iteration_summary(
+                    iteration=iteration,
+                    collection_dir=collection_dir,
+                    adapter_dir=adapter_dir,
+                    records_path=records_path,
+                    generator_adapter_path=adapter_path,
+                    results_count=len(results),
+                    best_verified_reward=best_verified_reward,
+                    trainer_status="not_started_pause_requested",
+                    trainer_final_loss=None,
+                )
+            )
+            summary = build_pipeline_summary(config, iteration_summaries, started_at, status="paused")
+            pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            return summary
 
         metrics_path = adapter_dir / "trainer_metrics.json"
         if metrics_path.exists() and not config.force_train:
@@ -111,32 +139,34 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
                     algorithm=config.trainer_algorithm,
                     clip_epsilon=config.trainer_clip_epsilon,
                     beta_kl=config.trainer_beta_kl,
+                    resume=True,
+                    pause_path=pause_path.as_posix(),
                 )
             )
-            trainer_status = "trained"
+            trainer_status = trainer_metrics.get("status", "trained")
 
-        best_verified_reward = max(
-            (result.mean_reward for result in results if result.mean_reward is not None),
-            default=None,
-        )
         iteration_summaries.append(
-            {
-                "iteration": iteration,
-                "collection_output_dir": collection_dir.as_posix(),
-                "adapter_output_dir": adapter_dir.as_posix(),
-                "records_path": records_path.as_posix(),
-                "generator_adapter_path": adapter_path,
-                "collection_results": len(results),
-                "best_verified_reward": best_verified_reward,
-                "trainer_status": trainer_status,
-                "trainer_final_loss": trainer_metrics.get("final_loss"),
-            }
+            iteration_summary(
+                iteration=iteration,
+                collection_dir=collection_dir,
+                adapter_dir=adapter_dir,
+                records_path=records_path,
+                generator_adapter_path=adapter_path,
+                results_count=len(results),
+                best_verified_reward=best_verified_reward,
+                trainer_status=trainer_status,
+                trainer_final_loss=trainer_metrics.get("final_loss"),
+            )
         )
+        if trainer_status == "paused":
+            summary = build_pipeline_summary(config, iteration_summaries, started_at, status="paused")
+            pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            return summary
         adapter_path = adapter_dir.as_posix()
-        summary = build_pipeline_summary(config, iteration_summaries, started_at)
+        summary = build_pipeline_summary(config, iteration_summaries, started_at, status="running")
         pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    summary = build_pipeline_summary(config, iteration_summaries, started_at)
+    summary = build_pipeline_summary(config, iteration_summaries, started_at, status="completed")
     pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 
@@ -145,10 +175,13 @@ def build_pipeline_summary(
     config: FullPipelineConfig,
     iteration_summaries: list[dict[str, Any]],
     started_at: float,
+    *,
+    status: str,
 ) -> dict[str, Any]:
     summary = {
         "config": asdict(config),
         "run_root": config.run_root,
+        "status": status,
         "iterations_completed": len(iteration_summaries),
         "iterations": iteration_summaries,
         "latest_adapter_output_dir": iteration_summaries[-1]["adapter_output_dir"] if iteration_summaries else None,
@@ -164,6 +197,31 @@ def build_pipeline_summary(
         "updated_at": time.time(),
     }
     return summary
+
+
+def iteration_summary(
+    *,
+    iteration: int,
+    collection_dir: Path,
+    adapter_dir: Path,
+    records_path: Path,
+    generator_adapter_path: str | None,
+    results_count: int,
+    best_verified_reward: float | None,
+    trainer_status: str,
+    trainer_final_loss: float | None,
+) -> dict[str, Any]:
+    return {
+        "iteration": iteration,
+        "collection_output_dir": collection_dir.as_posix(),
+        "adapter_output_dir": adapter_dir.as_posix(),
+        "records_path": records_path.as_posix(),
+        "generator_adapter_path": generator_adapter_path,
+        "collection_results": results_count,
+        "best_verified_reward": best_verified_reward,
+        "trainer_status": trainer_status,
+        "trainer_final_loss": trainer_final_loss,
+    }
 
 
 def parse_args() -> argparse.Namespace:

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,8 @@ class RlvrTrainerConfig:
     algorithm: str
     clip_epsilon: float
     beta_kl: float
+    resume: bool = True
+    pause_path: str | None = None
 
 
 class RlvrDataset(Dataset[dict[str, Any]]):
@@ -274,6 +277,16 @@ def train_rlvr(config: RlvrTrainerConfig) -> dict[str, Any]:
 
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = latest_trainer_checkpoint(output_dir) if config.resume else None
+    start_epoch = 0
+    losses: list[float] = []
+    effective_adapter_path = config.adapter_path
+    if checkpoint is not None:
+        state = json.loads((checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
+        start_epoch = int(state.get("next_epoch", 0))
+        losses = [float(loss) for loss in state.get("losses", [])]
+        effective_adapter_path = checkpoint.as_posix()
+
     if config.algorithm == "grpo":
         examples = load_grpo_examples(Path(config.records_path))
     elif config.algorithm == "weighted_sft":
@@ -304,8 +317,8 @@ def train_rlvr(config: RlvrTrainerConfig) -> dict[str, Any]:
     if config.load_in_4bit:
         model = prepare_model_for_kbit_training(model)
 
-    if config.adapter_path:
-        model = PeftModel.from_pretrained(model, config.adapter_path, is_trainable=True)
+    if effective_adapter_path:
+        model = PeftModel.from_pretrained(model, effective_adapter_path, is_trainable=True)
     else:
         lora_config = LoraConfig(
             r=config.lora_r,
@@ -326,9 +339,15 @@ def train_rlvr(config: RlvrTrainerConfig) -> dict[str, Any]:
         collate_fn=lambda batch: collate_batch(batch, tokenizer.pad_token_id),
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
-    losses: list[float] = []
 
-    for epoch in range(config.epochs):
+    if start_epoch >= config.epochs:
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        metrics = trainer_metrics(config, examples, losses, status="completed_from_checkpoint")
+        atomic_write_text(output_dir / "trainer_metrics.json", json.dumps(metrics, indent=2))
+        return metrics
+
+    for epoch in range(start_epoch, config.epochs):
         for batch in dataloader:
             batch = {key: value.to(model.device) for key, value in batch.items()}
             outputs = model(
@@ -352,19 +371,71 @@ def train_rlvr(config: RlvrTrainerConfig) -> dict[str, Any]:
             optimizer.zero_grad(set_to_none=True)
             losses.append(float(loss.detach().cpu()))
         write_jsonl(output_dir / "trainer_events.jsonl", [{"epoch": epoch, "loss": losses[-1]}], append=True)
+        save_trainer_checkpoint(output_dir, model, tokenizer, config, epoch + 1, losses)
+        if pause_requested(config.pause_path):
+            return trainer_metrics(config, examples, losses, status="paused")
 
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    metrics = {
+    metrics = trainer_metrics(config, examples, losses, status="completed")
+    atomic_write_text(output_dir / "trainer_metrics.json", json.dumps(metrics, indent=2))
+    return metrics
+
+
+def trainer_metrics(
+    config: RlvrTrainerConfig,
+    examples: list[RlvrTrainingExample],
+    losses: list[float],
+    *,
+    status: str,
+) -> dict[str, Any]:
+    return {
         "config": asdict(config),
         "algorithm": config.algorithm,
         "examples": len(examples),
         "mean_reward": sum(example.reward for example in examples) / len(examples),
         "losses": losses,
         "final_loss": losses[-1] if losses else None,
+        "status": status,
     }
-    (output_dir / "trainer_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    return metrics
+
+
+def save_trainer_checkpoint(
+    output_dir: Path,
+    model: Any,
+    tokenizer: Any,
+    config: RlvrTrainerConfig,
+    next_epoch: int,
+    losses: list[float],
+) -> None:
+    checkpoint_dir = output_dir / "checkpoints" / f"epoch_{next_epoch:04d}"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(checkpoint_dir)
+    tokenizer.save_pretrained(checkpoint_dir)
+    state = {
+        "config": asdict(config),
+        "next_epoch": next_epoch,
+        "losses": losses,
+        "updated_at": time.time(),
+    }
+    atomic_write_text(checkpoint_dir / "trainer_state.json", json.dumps(state, indent=2))
+
+
+def latest_trainer_checkpoint(output_dir: Path) -> Path | None:
+    checkpoint_root = output_dir / "checkpoints"
+    if not checkpoint_root.exists():
+        return None
+    checkpoints = [
+        path for path in checkpoint_root.glob("epoch_*")
+        if path.is_dir() and (path / "trainer_state.json").exists()
+    ]
+    if not checkpoints:
+        return None
+    return max(checkpoints, key=lambda path: int(path.name.rsplit("_", 1)[-1]))
+
+
+def pause_requested(pause_path: str | None) -> bool:
+    return pause_path is not None and Path(pause_path).exists()
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]], *, append: bool = False) -> None:
@@ -372,6 +443,12 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]], *, append: bool = False)
     with path.open(mode, encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -392,6 +469,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--algorithm", choices=["weighted_sft", "grpo"], default="grpo")
     parser.add_argument("--clip-epsilon", type=float, default=0.2)
     parser.add_argument("--beta-kl", type=float, default=0.01)
+    parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--pause-path", default=None)
     return parser.parse_args()
 
 
@@ -414,6 +493,8 @@ def main() -> None:
         algorithm=args.algorithm,
         clip_epsilon=args.clip_epsilon,
         beta_kl=args.beta_kl,
+        resume=not args.no_resume,
+        pause_path=args.pause_path,
     )
     metrics = train_rlvr(config)
     print(json.dumps({"output_dir": args.output_dir.as_posix(), "final_loss": metrics["final_loss"]}, indent=2))

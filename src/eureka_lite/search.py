@@ -189,6 +189,7 @@ def run_search(
     mjwarp_episode_steps: int = 500,
     mjwarp_policy_iterations: int = 4,
     mjwarp_elite_frac: float = 0.1,
+    pause_path: Path | None = None,
     resume: bool = False,
     overwrite: bool = False,
 ) -> list[CandidateResult]:
@@ -354,6 +355,10 @@ def run_search(
                 best_expression=best_expression,
                 best_score=best_score,
             )
+            if pause_requested(pause_path):
+                log_event(output_dir, "run_paused", {"generation": generation, "candidate": candidate.name})
+                log_message(output_dir, f"run paused after generation {generation} candidate {candidate.name}")
+                return all_results
 
         generation_results.sort(key=result_sort_key, reverse=True)
         best = generation_results[0].candidate
@@ -388,6 +393,10 @@ def run_search(
             best_score=best_score,
         )
         state = None
+        if pause_requested(pause_path):
+            log_event(output_dir, "run_paused", {"generation": generation})
+            log_message(output_dir, f"run paused after generation {generation}")
+            return all_results
 
     write_results(output_dir, all_results)
     log_event(output_dir, "run_finished", {"results_count": len(all_results), "best_score": best_score})
@@ -616,3 +625,7 @@ def candidate_from_dict(row: dict[str, Any]) -> RewardCandidate:
         completion_token_ids=row.get("completion_token_ids"),
         old_logprobs=row.get("old_logprobs"),
     )
+
+
+def pause_requested(pause_path: Path | None) -> bool:
+    return pause_path is not None and pause_path.exists()
