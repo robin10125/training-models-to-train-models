@@ -32,6 +32,7 @@ class CandidateResult:
     status: str = "success"
     error: str | None = None
     elapsed_seconds: float | None = None
+    metadata: dict[str, Any] | None = None
 
 
 def train_and_evaluate(
@@ -43,6 +44,11 @@ def train_and_evaluate(
     n_envs: int,
     seed: int,
     device: str,
+    sim_backend: str = "sb3",
+    worlds_per_candidate: int = 4096,
+    mjwarp_episode_steps: int = 500,
+    mjwarp_policy_iterations: int = 4,
+    mjwarp_elite_frac: float = 0.1,
 ) -> CandidateResult:
     started_at = time.monotonic()
     adapter = get_adapter(task)
@@ -58,6 +64,38 @@ def train_and_evaluate(
             status="generated_only",
             elapsed_seconds=time.monotonic() - started_at,
         )
+
+    if sim_backend == "mjwarp":
+        from .mjwarp_evaluator import MjwarpEvaluatorConfig, train_and_evaluate_mjwarp
+
+        warp_device = "cuda:0" if device in {"auto", "cuda"} else device
+        result = train_and_evaluate_mjwarp(
+            candidate,
+            MjwarpEvaluatorConfig(
+                task=task,
+                worlds_per_candidate=worlds_per_candidate,
+                episode_steps=mjwarp_episode_steps,
+                policy_iterations=mjwarp_policy_iterations,
+                elite_frac=mjwarp_elite_frac,
+                seed=seed,
+                device=warp_device,
+                eval_episodes=eval_episodes,
+            ),
+        )
+        return CandidateResult(
+            candidate=candidate,
+            mean_reward=result["mean_reward"],
+            std_reward=result["std_reward"],
+            episode_rewards=result["episode_rewards"],
+            timesteps=int(result["metadata"]["training_world_steps"]),
+            seed=seed,
+            task=task,
+            elapsed_seconds=result["elapsed_seconds"],
+            metadata=result["metadata"],
+        )
+
+    if sim_backend != "sb3":
+        raise ValueError(f"Unsupported simulation backend: {sim_backend}")
 
     def make_train_env():
         return RewardWrapper(gym.make(task), candidate.expression, adapter)
@@ -120,6 +158,11 @@ class RunConfig:
     temperature: float
     top_p: float
     load_in_4bit: bool
+    sim_backend: str = "sb3"
+    worlds_per_candidate: int = 4096
+    mjwarp_episode_steps: int = 500
+    mjwarp_policy_iterations: int = 4
+    mjwarp_elite_frac: float = 0.1
 
 
 def run_search(
@@ -139,6 +182,11 @@ def run_search(
     temperature: float = 0.7,
     top_p: float = 0.95,
     load_in_4bit: bool = True,
+    sim_backend: str = "sb3",
+    worlds_per_candidate: int = 4096,
+    mjwarp_episode_steps: int = 500,
+    mjwarp_policy_iterations: int = 4,
+    mjwarp_elite_frac: float = 0.1,
     resume: bool = False,
     overwrite: bool = False,
 ) -> list[CandidateResult]:
@@ -159,6 +207,11 @@ def run_search(
         temperature = float(checkpoint_config["temperature"])
         top_p = float(checkpoint_config["top_p"])
         load_in_4bit = bool(checkpoint_config["load_in_4bit"])
+        sim_backend = checkpoint_config.get("sim_backend", "sb3")
+        worlds_per_candidate = int(checkpoint_config.get("worlds_per_candidate", 4096))
+        mjwarp_episode_steps = int(checkpoint_config.get("mjwarp_episode_steps", 500))
+        mjwarp_policy_iterations = int(checkpoint_config.get("mjwarp_policy_iterations", 4))
+        mjwarp_elite_frac = float(checkpoint_config.get("mjwarp_elite_frac", 0.1))
 
     run_config = RunConfig(
         task=task,
@@ -175,6 +228,11 @@ def run_search(
         temperature=temperature,
         top_p=top_p,
         load_in_4bit=load_in_4bit,
+        sim_backend=sim_backend,
+        worlds_per_candidate=worlds_per_candidate,
+        mjwarp_episode_steps=mjwarp_episode_steps,
+        mjwarp_policy_iterations=mjwarp_policy_iterations,
+        mjwarp_elite_frac=mjwarp_elite_frac,
     )
     rng = random.Random(seed)
     prepare_output_dir(output_dir, run_config, resume=resume, overwrite=overwrite)
@@ -220,7 +278,11 @@ def run_search(
         return all_results
 
     log_event(output_dir, "run_started", {"config": asdict(run_config), "resume": resume})
-    log_message(output_dir, f"run started: task={task} generator={generator} generations={generations} population={population}")
+    log_message(
+        output_dir,
+        f"run started: task={task} generator={generator} generations={generations} "
+        f"population={population} sim_backend={sim_backend}",
+    )
     for generation in range(start_generation, generations):
         log_event(output_dir, "generation_started", {"generation": generation})
         log_message(output_dir, f"generation {generation} started")
@@ -251,6 +313,11 @@ def run_search(
                 n_envs=n_envs,
                 seed=seed + generation * 100 + idx,
                 device=device,
+                sim_backend=sim_backend,
+                worlds_per_candidate=worlds_per_candidate,
+                mjwarp_episode_steps=mjwarp_episode_steps,
+                mjwarp_policy_iterations=mjwarp_policy_iterations,
+                mjwarp_elite_frac=mjwarp_elite_frac,
             )
             generation_results.append(result)
             all_results.append(result)
@@ -332,6 +399,11 @@ def run_candidate_safely(
     n_envs: int,
     seed: int,
     device: str,
+    sim_backend: str = "sb3",
+    worlds_per_candidate: int = 4096,
+    mjwarp_episode_steps: int = 500,
+    mjwarp_policy_iterations: int = 4,
+    mjwarp_elite_frac: float = 0.1,
 ) -> CandidateResult:
     try:
         return train_and_evaluate(
@@ -342,6 +414,11 @@ def run_candidate_safely(
             n_envs=n_envs,
             seed=seed,
             device=device,
+            sim_backend=sim_backend,
+            worlds_per_candidate=worlds_per_candidate,
+            mjwarp_episode_steps=mjwarp_episode_steps,
+            mjwarp_policy_iterations=mjwarp_policy_iterations,
+            mjwarp_elite_frac=mjwarp_elite_frac,
         )
     except Exception as exc:
         return CandidateResult(
@@ -354,6 +431,7 @@ def run_candidate_safely(
             task=task,
             status="failed",
             error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            metadata={"sim_backend": sim_backend},
         )
 
 
@@ -405,6 +483,7 @@ def to_rlvr_record(result: CandidateResult) -> dict[str, object]:
         "status": result.status,
         "error": result.error,
         "elapsed_seconds": result.elapsed_seconds,
+        "metadata": result.metadata,
     }
 
 
@@ -514,6 +593,7 @@ def candidate_result_from_dict(row: dict[str, Any]) -> CandidateResult:
         status=row.get("status", "success"),
         error=row.get("error"),
         elapsed_seconds=row.get("elapsed_seconds"),
+        metadata=row.get("metadata"),
     )
 
 

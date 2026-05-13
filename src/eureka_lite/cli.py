@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-envs", type=int, default=4)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--sim-backend", default="sb3", choices=["sb3", "mjwarp"])
+    parser.add_argument("--worlds-per-candidate", type=int, default=4096)
+    parser.add_argument("--mjwarp-episode-steps", type=int, default=500)
+    parser.add_argument("--mjwarp-policy-iterations", type=int, default=4)
+    parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/latest"))
     parser.add_argument("--generator", default="mock", choices=["mock", "hf"])
     parser.add_argument("--model-id", default=DEFAULT_HF_MODEL_ID)
@@ -57,7 +62,7 @@ def main() -> None:
     console.print(
         f"Running reward search: task={display_args.task}, generations={display_args.generations}, "
         f"population={display_args.population}, timesteps={display_args.timesteps}, device={display_args.device}, "
-        f"generator={display_args.generator}"
+        f"generator={display_args.generator}, sim_backend={display_args.sim_backend}"
     )
 
     results = run_search(
@@ -76,6 +81,11 @@ def main() -> None:
         temperature=args.temperature,
         top_p=args.top_p,
         load_in_4bit=not args.no_4bit,
+        sim_backend=args.sim_backend,
+        worlds_per_candidate=args.worlds_per_candidate,
+        mjwarp_episode_steps=args.mjwarp_episode_steps,
+        mjwarp_policy_iterations=args.mjwarp_policy_iterations,
+        mjwarp_elite_frac=args.mjwarp_elite_frac,
         resume=args.resume,
         overwrite=args.overwrite,
     )

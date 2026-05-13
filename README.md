@@ -38,6 +38,26 @@ pip install torch
 pip install -r requirements.txt
 ```
 
+For a fresh machine with a large NVIDIA GPU, the full MJWarp/RLVR setup and
+experiment can be launched with:
+
+```bash
+./scripts/run_full_mjwarp_rlvr_96gb.sh
+```
+
+The script creates `.venv`, installs PyTorch and `mujoco-warp`, runs a small
+CUDA/MJWarp smoke test, then launches the single-command training pipeline that
+collects a 16-candidate x 4096-world Ant EUREKA batch and trains a GRPO LoRA
+adapter from the resulting RLVR records. By default it requires a GPU with at
+least 90000 MiB of VRAM. Override settings with environment variables, for
+example:
+
+```bash
+OUTPUT_DIR=runs/my_96gb_run \
+ADAPTER_OUTPUT_DIR=runs/my_96gb_adapter \
+./scripts/run_full_mjwarp_rlvr_96gb.sh
+```
+
 ## Run
 
 ```bash
@@ -100,7 +120,33 @@ python -m eureka_lite.mjwarp_ant \
   --action-mode random-once
 ```
 
-This uses MuJoCo Warp for GPU physics and reports world-steps per second. It is
-currently a batched simulation/benchmark path, not a drop-in replacement for the
-SB3 PPO training loop. Building training on top of it requires a custom rollout
-and policy-update loop that consumes the batched device state directly.
+This command is a pure simulation benchmark. The main reward-search CLI also
+supports `--sim-backend mjwarp`, which uses the same GPU physics path for a
+batched Ant policy-search evaluator.
+
+Run the full MJWarp-backed EUREKA/RLVR pipeline directly after setup:
+
+```bash
+python -m eureka_lite.pipeline \
+  --task Ant-v5 \
+  --model-id deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
+  --collection-output-dir runs/deepseek_lite_ant_mjwarp_16x4096 \
+  --adapter-output-dir runs/deepseek_lite_ant_mjwarp_grpo_adapter \
+  --population 16 \
+  --generations 1 \
+  --worlds-per-candidate 4096 \
+  --mjwarp-episode-steps 500 \
+  --mjwarp-policy-iterations 4 \
+  --mjwarp-elite-frac 0.1 \
+  --eval-episodes 5 \
+  --device cuda \
+  --trainer-algorithm grpo \
+  --trainer-epochs 1 \
+  --trainer-batch-size 1 \
+  --trainer-learning-rate 5e-5
+```
+
+The MJWarp evaluator trains a batched population of simple Ant policies with
+the generated reward expression, then scores the best policy with true
+Gymnasium Ant return for the RLVR record. The pipeline then trains the GRPO LoRA
+adapter from those records and writes `pipeline_state.json`.
