@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--population", type=int, default=4)
+    parser.add_argument("--eureka-elites", type=int, default=4)
     parser.add_argument("--timesteps", type=int, default=10_000)
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--n-envs", type=int, default=4)
@@ -56,6 +57,8 @@ def main() -> None:
         raise SystemExit("--population must be at least 1")
     if args.generations < 1:
         raise SystemExit("--generations must be at least 1")
+    if args.eureka_elites < 1:
+        raise SystemExit("--eureka-elites must be at least 1")
 
     console = Console()
     display_args = args
@@ -81,6 +84,7 @@ def main() -> None:
         seed=args.seed,
         device=args.device,
         output_dir=args.output_dir,
+        eureka_elites=args.eureka_elites,
         generator=args.generator,
         model_id=args.model_id,
         adapter_path=args.adapter_path,

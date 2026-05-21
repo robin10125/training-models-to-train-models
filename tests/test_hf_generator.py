@@ -25,6 +25,17 @@ class HfGeneratorHelperTests(unittest.TestCase):
         self.assertIn("action_l2", prompt)
         self.assertIn("Current best reward expression", prompt)
 
+    def test_build_reward_prompt_includes_eureka_elites(self) -> None:
+        prompt = build_reward_prompt(
+            task="Ant-v5",
+            reward_variables=["action_l2", "survive_reward", "x_velocity"],
+            best_expression="x_velocity",
+            best_score=10.0,
+            elites=[{"name": "elite_0", "expression": "x_velocity", "score": 10.0}],
+        )
+        self.assertIn("EUREKA elite archive", prompt)
+        self.assertIn("elite_0", prompt)
+
     def test_token_logprobs_matches_generated_tokens(self) -> None:
         import torch
 
@@ -39,4 +50,3 @@ class HfGeneratorHelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

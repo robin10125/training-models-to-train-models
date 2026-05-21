@@ -52,6 +52,7 @@ class CheckpointingTests(unittest.TestCase):
             task="Ant-v5",
             generations=1,
             population=1,
+            eureka_elites=1,
             timesteps=0,
             eval_episodes=0,
             n_envs=1,
@@ -100,6 +101,37 @@ class CheckpointingTests(unittest.TestCase):
         self.assertEqual(record["error"], "boom")
         self.assertEqual(record["elapsed_seconds"], 1.0)
 
+    def test_search_records_eureka_lineage_and_rank_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            results = run_search(
+                task="Ant-v5",
+                generations=2,
+                population=3,
+                eureka_elites=2,
+                timesteps=0,
+                eval_episodes=0,
+                n_envs=1,
+                seed=7,
+                device="cpu",
+                output_dir=output_dir,
+                generator="mock",
+            )
+            records = [
+                json.loads(line)
+                for line in (output_dir / "rlvr_records.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(len(results), 6)
+        self.assertTrue(any(record["eureka_parent_names"] for record in records))
+        self.assertTrue(any(record["eureka_elite_names"] for record in records))
+        self.assertTrue(
+            any(
+                record["metadata"] is not None and record["metadata"].get("eureka_selected_elite")
+                for record in records
+            )
+        )
+
     def test_resume_completed_run_is_noop(self) -> None:
         candidate = initial_population("Ant-v5", 1, __import__("random").Random(7))[0]
         result = CandidateResult(
@@ -116,6 +148,7 @@ class CheckpointingTests(unittest.TestCase):
             task="Ant-v5",
             generations=1,
             population=1,
+            eureka_elites=1,
             timesteps=0,
             eval_episodes=0,
             n_envs=1,

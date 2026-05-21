@@ -4,7 +4,7 @@ import json
 import random
 import time
 import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +157,7 @@ class RunConfig:
     task: str
     generations: int
     population: int
+    eureka_elites: int
     timesteps: int
     eval_episodes: int
     n_envs: int
@@ -192,6 +193,7 @@ def run_search(
     seed: int,
     device: str,
     output_dir: Path,
+    eureka_elites: int = 4,
     generator: str = "mock",
     model_id: str = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
     adapter_path: str | None = None,
@@ -219,6 +221,7 @@ def run_search(
         task = checkpoint_config["task"]
         generations = int(checkpoint_config["generations"])
         population = int(checkpoint_config["population"])
+        eureka_elites = int(checkpoint_config.get("eureka_elites", 4))
         timesteps = int(checkpoint_config["timesteps"])
         eval_episodes = int(checkpoint_config["eval_episodes"])
         n_envs = int(checkpoint_config["n_envs"])
@@ -246,6 +249,7 @@ def run_search(
         task=task,
         generations=generations,
         population=population,
+        eureka_elites=eureka_elites,
         timesteps=timesteps,
         eval_episodes=eval_episodes,
         n_envs=n_envs,
@@ -304,6 +308,7 @@ def run_search(
     )
     best_expression: str | None = state.get("best_expression") if state else None
     best_score: float | None = state.get("best_score") if state else None
+    elite_context: list[dict[str, Any]] = list(state.get("elite_context", [])) if state else []
     start_generation = int(state.get("next_generation", 0)) if state else 0
     completed_keys = {result_key(result.candidate.generation, result.candidate.name) for result in all_results}
 
@@ -329,6 +334,7 @@ def run_search(
                 generation=generation,
                 best_expression=best_expression,
                 best_score=best_score,
+                elites=elite_context,
             )
         generation_results = []
         for idx, candidate in enumerate(candidates):
@@ -389,6 +395,7 @@ def run_search(
                 next_candidates=candidates,
                 best_expression=best_expression,
                 best_score=best_score,
+                elite_context=elite_context,
             )
             if pause_requested(pause_path):
                 log_event(output_dir, "run_paused", {"generation": generation, "candidate": candidate.name})
@@ -396,6 +403,9 @@ def run_search(
                 return all_results
 
         generation_results.sort(key=result_sort_key, reverse=True)
+        generation_results = annotate_generation_results(generation_results, eureka_elites)
+        all_results = replace_generation_results(all_results, generation_results)
+        elite_context = elite_context_from_results(generation_results, eureka_elites)
         best = generation_results[0].candidate
         best_expression = best.expression
         best_score = generation_results[0].mean_reward
@@ -406,16 +416,29 @@ def run_search(
                 "generation": generation,
                 "best_candidate": best.name,
                 "best_score": best_score,
+                "elite_context": elite_context,
             },
         )
         log_message(output_dir, f"generation {generation} finished: best={best.name} score={best_score}")
         write_results(output_dir, all_results)
 
         if hf_generator is None:
-            candidates = [best]
-            candidates.extend(
-                mutate_candidate(best, i, generation + 1, rng) for i in range(max(0, population - 1))
-            )
+            parents = [result.candidate for result in generation_results[: max(1, min(eureka_elites, len(generation_results)))]]
+            parent_scores = {result.candidate.name: result.mean_reward for result in generation_results}
+            candidates = []
+            for i in range(population):
+                parent = parents[i % len(parents)]
+                child = mutate_candidate(parent, i, generation + 1, rng)
+                candidates.append(
+                    replace(
+                        child,
+                        eureka_parent_scores=[parent_scores.get(parent.name)],
+                        eureka_elite_names=[str(item["name"]) for item in elite_context],
+                        eureka_elite_expressions=[str(item["expression"]) for item in elite_context],
+                        eureka_elite_scores=[item["score"] for item in elite_context],
+                        eureka_feedback=format_elite_context(elite_context),
+                    )
+                )
         else:
             candidates = []
         save_checkpoint(
@@ -426,6 +449,7 @@ def run_search(
             next_candidates=candidates,
             best_expression=best_expression,
             best_score=best_score,
+            elite_context=elite_context,
         )
         state = None
         if pause_requested(pause_path):
@@ -532,6 +556,14 @@ def to_rlvr_record(result: CandidateResult) -> dict[str, object]:
         "task": result.task,
         "candidate_name": candidate.name,
         "candidate_generation": candidate.generation,
+        "eureka_role": candidate.eureka_role,
+        "eureka_parent_names": candidate.eureka_parent_names,
+        "eureka_parent_expressions": candidate.eureka_parent_expressions,
+        "eureka_parent_scores": candidate.eureka_parent_scores,
+        "eureka_elite_names": candidate.eureka_elite_names,
+        "eureka_elite_expressions": candidate.eureka_elite_expressions,
+        "eureka_elite_scores": candidate.eureka_elite_scores,
+        "eureka_feedback": candidate.eureka_feedback,
         "train_reward_expression": candidate.expression,
         "verified_reward": result.mean_reward,
         "verified_reward_std": result.std_reward,
@@ -584,6 +616,7 @@ def save_checkpoint(
     next_candidates: list[RewardCandidate],
     best_expression: str | None,
     best_score: float | None,
+    elite_context: list[dict[str, Any]] | None = None,
 ) -> None:
     payload = {
         "config": asdict(config),
@@ -591,6 +624,7 @@ def save_checkpoint(
         "next_candidates": [asdict(candidate) for candidate in next_candidates],
         "best_expression": best_expression,
         "best_score": best_score,
+        "elite_context": elite_context or [],
         "results": [candidate_result_to_dict(result) for result in results],
         "updated_at": time.time(),
     }
@@ -669,8 +703,75 @@ def candidate_from_dict(row: dict[str, Any]) -> RewardCandidate:
         generator_checkpoint=row.get("generator_checkpoint", "mock-v1"),
         completion_token_ids=row.get("completion_token_ids"),
         old_logprobs=row.get("old_logprobs"),
+        eureka_role=row.get("eureka_role", "initial"),
+        eureka_parent_names=row.get("eureka_parent_names"),
+        eureka_parent_expressions=row.get("eureka_parent_expressions"),
+        eureka_parent_scores=row.get("eureka_parent_scores"),
+        eureka_elite_names=row.get("eureka_elite_names"),
+        eureka_elite_expressions=row.get("eureka_elite_expressions"),
+        eureka_elite_scores=row.get("eureka_elite_scores"),
+        eureka_feedback=row.get("eureka_feedback"),
     )
 
 
 def pause_requested(pause_path: Path | None) -> bool:
     return pause_path is not None and pause_path.exists()
+
+
+def elite_context_from_results(results: list[CandidateResult], elite_count: int) -> list[dict[str, Any]]:
+    if elite_count < 1:
+        raise ValueError("--eureka-elites must be at least 1")
+    elites = sorted(results, key=result_sort_key, reverse=True)[:elite_count]
+    return [
+        {
+            "rank": rank,
+            "name": result.candidate.name,
+            "expression": result.candidate.expression,
+            "score": result.mean_reward,
+            "status": result.status,
+            "verified_reward_type": result.verified_reward_type,
+        }
+        for rank, result in enumerate(elites, start=1)
+    ]
+
+
+def annotate_generation_results(results: list[CandidateResult], elite_count: int) -> list[CandidateResult]:
+    annotated = []
+    generation_size = len(results)
+    for rank, result in enumerate(results, start=1):
+        metadata = dict(result.metadata or {})
+        metadata.update(
+            {
+                "eureka_generation_rank": rank,
+                "eureka_generation_size": generation_size,
+                "eureka_selected_elite": rank <= elite_count,
+            }
+        )
+        annotated.append(replace(result, metadata=metadata))
+    return annotated
+
+
+def replace_generation_results(
+    all_results: list[CandidateResult], generation_results: list[CandidateResult]
+) -> list[CandidateResult]:
+    updates = {
+        result_key(result.candidate.generation, result.candidate.name): result for result in generation_results
+    }
+    return [
+        updates.get(result_key(result.candidate.generation, result.candidate.name), result)
+        for result in all_results
+    ]
+
+
+def format_elite_context(elites: list[dict[str, Any]]) -> str | None:
+    if not elites:
+        return None
+    lines = []
+    for item in elites:
+        score = item.get("score")
+        score_text = "n/a" if score is None else f"{float(score):.4f}"
+        lines.append(
+            f"{item.get('rank')}. name={item.get('name')} true_return={score_text} "
+            f"expression={item.get('expression')}"
+        )
+    return "\n".join(lines)

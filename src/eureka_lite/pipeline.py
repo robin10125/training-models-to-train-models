@@ -20,6 +20,7 @@ class FullPipelineConfig:
     iterations: int
     population: int
     generations: int
+    eureka_elites: int
     worlds_per_candidate: int
     mjwarp_evaluator: str
     mjwarp_episode_steps: int
@@ -78,6 +79,7 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
             seed=config.seed + iteration * 10_000,
             device=config.device,
             output_dir=collection_dir,
+            eureka_elites=config.eureka_elites,
             generator="hf",
             model_id=config.model_id,
             adapter_path=adapter_path,
@@ -241,7 +243,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-root", type=Path, default=Path("runs/deepseek_lite_ant_mjwarp_rlvr"))
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--population", type=int, default=16)
-    parser.add_argument("--generations", type=int, default=1)
+    parser.add_argument("--generations", type=int, default=3)
+    parser.add_argument("--eureka-elites", type=int, default=4)
     parser.add_argument("--worlds-per-candidate", type=int, default=4096)
     parser.add_argument("--mjwarp-evaluator", choices=["ppo", "search"], default="ppo")
     parser.add_argument("--mjwarp-episode-steps", type=int, default=500)
@@ -280,6 +283,8 @@ def main() -> None:
         raise SystemExit("--iterations must be at least 1")
     if args.population < 2 and args.trainer_algorithm == "grpo":
         raise SystemExit("--trainer-algorithm grpo requires --population at least 2")
+    if args.eureka_elites < 1:
+        raise SystemExit("--eureka-elites must be at least 1")
     config = FullPipelineConfig(
         task=args.task,
         model_id=args.model_id,
@@ -287,6 +292,7 @@ def main() -> None:
         iterations=args.iterations,
         population=args.population,
         generations=args.generations,
+        eureka_elites=args.eureka_elites,
         worlds_per_candidate=args.worlds_per_candidate,
         mjwarp_evaluator=args.mjwarp_evaluator,
         mjwarp_episode_steps=args.mjwarp_episode_steps,

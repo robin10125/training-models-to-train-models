@@ -60,6 +60,9 @@ def mutate_candidate(parent: RewardCandidate, index: int, generation: int, rng: 
         expression=expression,
         weights=weights,
         generation=generation,
+        eureka_role="mock_mutation",
+        eureka_parent_names=[parent.name],
+        eureka_parent_expressions=[parent.expression],
     )
 
 
@@ -153,6 +156,14 @@ def _candidate(
     expression: str,
     weights: dict[str, float],
     generation: int,
+    eureka_role: str = "initial",
+    eureka_parent_names: list[str] | None = None,
+    eureka_parent_expressions: list[str] | None = None,
+    eureka_parent_scores: list[float | None] | None = None,
+    eureka_elite_names: list[str] | None = None,
+    eureka_elite_expressions: list[str] | None = None,
+    eureka_elite_scores: list[float | None] | None = None,
+    eureka_feedback: str | None = None,
 ) -> RewardCandidate:
     prompt = (
         f"Design a dense reward expression for {task}. "
@@ -169,5 +180,12 @@ def _candidate(
         generation=generation,
         generator_type=MOCK_GENERATOR_TYPE,
         generator_checkpoint=MOCK_GENERATOR_CHECKPOINT,
+        eureka_role=eureka_role,
+        eureka_parent_names=eureka_parent_names,
+        eureka_parent_expressions=eureka_parent_expressions,
+        eureka_parent_scores=eureka_parent_scores,
+        eureka_elite_names=eureka_elite_names,
+        eureka_elite_expressions=eureka_elite_expressions,
+        eureka_elite_scores=eureka_elite_scores,
+        eureka_feedback=eureka_feedback,
     )
-

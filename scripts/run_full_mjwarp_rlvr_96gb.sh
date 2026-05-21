@@ -10,7 +10,8 @@ MODEL_ID="${MODEL_ID:-deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct}"
 RUN_ROOT="${RUN_ROOT:-runs/deepseek_lite_ant_mjwarp_rlvr}"
 ITERATIONS="${ITERATIONS:-3}"
 POPULATION="${POPULATION:-16}"
-GENERATIONS="${GENERATIONS:-1}"
+GENERATIONS="${GENERATIONS:-3}"
+EUREKA_ELITES="${EUREKA_ELITES:-4}"
 WORLDS_PER_CANDIDATE="${WORLDS_PER_CANDIDATE:-4096}"
 MJWARP_EVALUATOR="${MJWARP_EVALUATOR:-ppo}"
 MJWARP_EPISODE_STEPS="${MJWARP_EPISODE_STEPS:-500}"
@@ -42,6 +43,8 @@ Options:
   --iterations N              RLVR sample/evaluate/train iterations.
   --run-root PATH             Output directory for the iterative run.
   --population N              Reward candidates per iteration.
+  --generations N             EUREKA generations per RLVR iteration.
+  --eureka-elites N           Ranked elites included in each refinement prompt.
   --worlds-per-candidate N    Ant worlds per reward candidate.
   --mjwarp-evaluator NAME     Evaluator: ppo or search. Default: ppo.
   --mjwarp-ppo-horizon N      PPO rollout horizon before each update.
@@ -72,6 +75,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --population)
       POPULATION="$2"
+      shift 2
+      ;;
+    --generations)
+      GENERATIONS="$2"
+      shift 2
+      ;;
+    --eureka-elites)
+      EUREKA_ELITES="$2"
       shift 2
       ;;
     --worlds-per-candidate)
@@ -223,6 +234,7 @@ PIPELINE_ARGS=(
   --iterations "$ITERATIONS"
   --population "$POPULATION"
   --generations "$GENERATIONS"
+  --eureka-elites "$EUREKA_ELITES"
   --worlds-per-candidate "$WORLDS_PER_CANDIDATE"
   --mjwarp-evaluator "$MJWARP_EVALUATOR"
   --mjwarp-episode-steps "$MJWARP_EPISODE_STEPS"

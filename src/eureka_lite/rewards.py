@@ -67,6 +67,14 @@ class RewardCandidate:
     generator_checkpoint: str = "mock-v1"
     completion_token_ids: list[int] | None = None
     old_logprobs: list[float] | None = None
+    eureka_role: str = "initial"
+    eureka_parent_names: list[str] | None = None
+    eureka_parent_expressions: list[str] | None = None
+    eureka_parent_scores: list[float | None] | None = None
+    eureka_elite_names: list[str] | None = None
+    eureka_elite_expressions: list[str] | None = None
+    eureka_elite_scores: list[float | None] | None = None
+    eureka_feedback: str | None = None
 
 
 class RewardExpression:

@@ -70,6 +70,7 @@ class HfRewardGenerator:
         generation: int,
         best_expression: str | None = None,
         best_score: float | None = None,
+        elites: list[dict[str, Any]] | None = None,
     ) -> list[RewardCandidate]:
         return [
             self.generate_candidate(
@@ -78,6 +79,7 @@ class HfRewardGenerator:
                 generation=generation,
                 best_expression=best_expression,
                 best_score=best_score,
+                elites=elites,
             )
             for index in range(population)
         ]
@@ -90,16 +92,19 @@ class HfRewardGenerator:
         generation: int,
         best_expression: str | None,
         best_score: float | None,
+        elites: list[dict[str, Any]] | None = None,
     ) -> RewardCandidate:
         adapter = get_adapter(task)
         prompt = ""
         last_error: Exception | None = None
+        eureka_feedback = format_eureka_feedback(elites)
         for attempt in range(3):
             prompt = build_reward_prompt(
                 task=task,
                 reward_variables=sorted(adapter.reward_variables),
                 best_expression=best_expression,
                 best_score=best_score,
+                elites=elites,
                 invalid_feedback=None if last_error is None else str(last_error),
             )
             text = self._chat_text(prompt)
@@ -140,6 +145,14 @@ class HfRewardGenerator:
                 generator_checkpoint=self.generator_checkpoint,
                 completion_token_ids=completion_token_ids,
                 old_logprobs=old_logprobs,
+                eureka_role="initial" if not elites else "elite_refinement",
+                eureka_parent_names=[str(item.get("name")) for item in elites] if elites else None,
+                eureka_parent_expressions=[str(item.get("expression")) for item in elites] if elites else None,
+                eureka_parent_scores=[item.get("score") for item in elites] if elites else None,
+                eureka_elite_names=[str(item.get("name")) for item in elites] if elites else None,
+                eureka_elite_expressions=[str(item.get("expression")) for item in elites] if elites else None,
+                eureka_elite_scores=[item.get("score") for item in elites] if elites else None,
+                eureka_feedback=eureka_feedback,
             )
 
         raise ValueError(f"HF generator failed to produce a valid reward expression after 3 attempts: {last_error}")
@@ -163,10 +176,18 @@ def build_reward_prompt(
     reward_variables: list[str],
     best_expression: str | None,
     best_score: float | None,
+    elites: list[dict[str, Any]] | None = None,
     invalid_feedback: str | None = None,
 ) -> str:
     feedback = ""
-    if best_expression is not None and best_score is not None:
+    if elites:
+        feedback = (
+            "\nEUREKA elite archive from the previous generation, ranked by true Ant-v5 return:\n"
+            f"{format_eureka_feedback(elites)}\n"
+            "Use these as evidence. Preserve useful locomotion incentives, remove likely distractors, "
+            "and produce one new reward expression that could outperform the ranked elites.\n"
+        )
+    elif best_expression is not None and best_score is not None:
         feedback = (
             "\nCurrent best reward expression:\n"
             f"{best_expression}\n"
@@ -192,6 +213,19 @@ def build_reward_prompt(
         f"{feedback}"
         f"{retry}"
     )
+
+
+def format_eureka_feedback(elites: list[dict[str, Any]] | None) -> str | None:
+    if not elites:
+        return None
+    rows = []
+    for rank, item in enumerate(elites, start=1):
+        score = item.get("score")
+        score_text = "n/a" if score is None else f"{float(score):.4f}"
+        rows.append(
+            f"{rank}. name={item.get('name')} true_return={score_text} expression={item.get('expression')}"
+        )
+    return "\n".join(rows)
 
 
 def extract_reward_expression(text: str) -> str:
