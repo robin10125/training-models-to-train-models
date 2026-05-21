@@ -29,8 +29,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--sim-backend", default="sb3", choices=["sb3", "mjwarp"])
     parser.add_argument("--worlds-per-candidate", type=int, default=4096)
+    parser.add_argument("--mjwarp-evaluator", default="ppo", choices=["ppo", "search"])
     parser.add_argument("--mjwarp-episode-steps", type=int, default=500)
     parser.add_argument("--mjwarp-policy-iterations", type=int, default=4)
+    parser.add_argument("--mjwarp-ppo-horizon", type=int, default=32)
+    parser.add_argument("--mjwarp-ppo-epochs", type=int, default=4)
+    parser.add_argument("--mjwarp-ppo-minibatch-size", type=int, default=16_384)
+    parser.add_argument("--mjwarp-ppo-learning-rate", type=float, default=3e-4)
     parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/latest"))
     parser.add_argument("--generator", default="mock", choices=["mock", "hf"])
@@ -85,8 +90,13 @@ def main() -> None:
         load_in_4bit=not args.no_4bit,
         sim_backend=args.sim_backend,
         worlds_per_candidate=args.worlds_per_candidate,
+        mjwarp_evaluator=args.mjwarp_evaluator,
         mjwarp_episode_steps=args.mjwarp_episode_steps,
         mjwarp_policy_iterations=args.mjwarp_policy_iterations,
+        mjwarp_ppo_horizon=args.mjwarp_ppo_horizon,
+        mjwarp_ppo_epochs=args.mjwarp_ppo_epochs,
+        mjwarp_ppo_minibatch_size=args.mjwarp_ppo_minibatch_size,
+        mjwarp_ppo_learning_rate=args.mjwarp_ppo_learning_rate,
         mjwarp_elite_frac=args.mjwarp_elite_frac,
         resume=args.resume,
         overwrite=args.overwrite,

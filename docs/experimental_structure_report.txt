@@ -1,0 +1,135 @@
+Experimental Structure And Research Motivation
+
+This project is an EUREKA-inspired RLVR experiment whose central goal is to
+train a code model to generate better reinforcement-learning reward functions.
+The experiment is not primarily about solving Ant locomotion once. Instead, Ant
+is used as a compact, measurable environment for studying whether a coding model
+can improve its reward-design behavior when downstream policy performance is
+used as the verifiable training signal.
+
+The core hypothesis is that reward-code generation can be treated as a
+reinforcement-learning problem for the language model. A sampled reward function
+is a model completion. The quality of that completion is not judged by whether
+it looks plausible to a human or matches a reference answer. It is judged by
+what happens when the reward function is actually used to train a policy. If the
+generated reward causes an Ant policy to achieve higher true environment return,
+then the completion receives a better verified score. That verified score is
+then used to update the reward-code model.
+
+This gives the project a two-level learning structure. The inner level trains
+or searches for Ant behavior under a generated reward expression. The outer
+level trains the reward-code generator from the measured downstream performance
+of the generated reward. In other words, the model is not trained to imitate
+known reward functions. It is trained from the consequences of the reward
+functions it writes.
+
+The default task is Gymnasium's `Ant-v5`. Ant is a useful starting point because
+reward design matters, but the environment is still small enough for repeated
+experimentation. It has meaningful locomotion dynamics, control costs, stability
+constraints, and failure modes. These make it a better test of reward design
+than a trivial control task, while remaining far cheaper than a large robotics
+benchmark.
+
+The project uses true environment return as the verified reward signal. This is
+an important distinction. The generated reward expression is used only to train
+or search for an Ant policy. It is not used as the final score for the language
+model. After a candidate reward has induced a policy, that policy is evaluated
+with the original `Ant-v5` reward. The original environment return becomes the
+scalar reward assigned to the model completion that generated the candidate
+reward expression.
+
+This separation is the main experimental mechanism. The reward-code model is
+allowed to invent dense shaping rewards, but it is ultimately selected for
+whether those rewards produce behavior that scores well under the real task
+objective. This mirrors the broad motivation of EUREKA: use language models to
+propose reward code, use simulation to evaluate the consequences, and iterate
+based on measured task performance.
+
+The full pipeline is iterative. In each iteration, the current generator model
+samples a population of reward-code candidates. Each candidate is evaluated by
+training or searching for Ant policies using that generated reward. The best
+policy behavior induced by each reward candidate is then scored with true Ant
+return. The resulting records contain the prompt, completion, token IDs,
+behavior-policy log probabilities, candidate metadata, and verified return.
+Those records form the RLVR dataset for that iteration.
+
+After collection, the project trains a LoRA adapter on the code model with a
+GRPO-style objective. Candidate rewards sampled from the same policy and prompt
+form a comparison group. Their verified returns are converted into relative
+advantages, so the model is pushed toward completions that performed better than
+other completions in the same group. The updated adapter is then used to sample
+the next iteration of reward candidates. This closes the learning loop.
+
+The chosen model is `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`, a
+Mixture-of-Experts coding model with 16B total parameters and approximately
+2.4B active parameters per token. It is large enough to have meaningful code
+generation ability while still being feasible to adapt with LoRA or QLoRA on a
+single large GPU. In this project, it acts as the reward-code policy. The LoRA
+adapter represents the learned improvement from EUREKA-verified feedback.
+
+The serious experiment is designed around repeated verified feedback rather
+than a single batch. A one-shot collect-then-train run can demonstrate that the
+plumbing works, but it does not fully test whether the model improves as a
+reward designer. The intended run uses 20 RLVR iterations, with 16 reward
+candidates per iteration and 4096 Ant worlds per candidate. This gives each
+iteration a meaningful group of alternatives and enough simulation scale to
+reduce the noise in candidate evaluation.
+
+MuJoCo Warp is used because the expensive part of the experiment is not model
+fine-tuning; it is evaluating many reward functions through simulation. Each
+candidate reward must be tested by observing what policy behavior it produces.
+Running thousands of Ant worlds concurrently on GPU makes this outer-loop
+reward evaluation much more practical. On a 96 GB GPU, the project can allocate
+large Ant batches while still leaving memory for model generation and LoRA
+training.
+
+The current default MJWarp evaluator trains one PPO actor-critic network per
+reward candidate. Each candidate gets its own neural policy, and that policy is
+trained across thousands of parallel Ant worlds with the generated reward as
+the training objective. The default policy network is a compact MLP with hidden
+layers `[256, 128, 64]` and ELU activations, matching the common Isaac
+Gym/rl_games style used for GPU-parallel locomotion tasks. The PPO loop uses
+clipped policy updates, GAE advantages, minibatch optimization, and value
+learning. This makes the reward evaluator much closer to EUREKA's usual
+structure than a lightweight random policy search.
+
+The older batched policy-search evaluator remains available as a fallback, but
+it is no longer the default. It is useful for debugging and very small smoke
+tests, but it is a weaker verifier: a good reward could look bad if the simple
+search procedure fails to exploit it. For serious RLVR, the PPO evaluator is
+preferred because it asks a stronger question: if this generated reward is used
+by a competent RL optimizer, does it produce a policy with high true Ant
+return?
+
+The project's data format is structured around future RL-style updates. Each
+record stores the exact prompt, sampled completion, completion token IDs,
+old per-token log probabilities, generator checkpoint or adapter identity, the
+generated reward expression, downstream evaluation status, seeds, and verified
+return. These fields are intended to support policy-gradient-style updates
+without needing to retain hidden states or KV caches from generation time.
+
+The expected measurement of success is improvement across iterations. The key
+question is whether later adapters sample reward functions that achieve higher
+verified Ant return than the base model or early adapters. Useful diagnostics
+include the best verified return per iteration, mean verified return per
+candidate group, variance across candidates, failure rate of generated reward
+expressions, and qualitative inspection of the reward expressions themselves.
+
+A strong result would show that the model learns reward-design patterns that
+consistently produce better downstream behavior, not merely that one lucky
+candidate performs well. The iterative design is meant to distinguish those two
+cases. If the model improves, later iterations should produce better candidates
+more often, with less reliance on random sampling.
+
+There are several limitations in the current structure. The environment is only
+Ant, so success would not yet prove general reward-design ability. The PPO
+implementation is intentionally compact and still lighter than a heavily tuned
+production locomotion trainer. GRPO uses stored behavior log probabilities and
+group-relative advantages, but the broader training setup is still lightweight
+compared with a production RLHF/RLVR system. There is also not yet a held-out
+suite of tasks for measuring generalization.
+
+Despite those limitations, the experiment captures the essential research
+idea: train a reward-code-generating model from the verified downstream
+performance of the reward code it writes. The purpose of the project is to make
+that loop concrete, measurable, and repeatable on a single large GPU.

@@ -6,7 +6,7 @@ model to generate better reward functions for reinforcement learning.
 The loop is:
 
 1. Sample reward-code candidates from a coding model.
-2. Use each reward candidate to train Ant policies in MuJoCo Warp.
+2. Use each reward candidate to train an Ant PPO policy in MuJoCo Warp.
 3. Evaluate the resulting policies with the true `Ant-v5` environment return.
 4. Store prompt, completion tokens, old logprobs, and verified return as RLVR data.
 5. Train a LoRA adapter with GRPO, then use that adapter to sample the next round.
@@ -51,7 +51,12 @@ and Ant-world batch size, but fewer RLVR iterations than the serious run.
 ## Serious Run
 
 Use this for the intended 96 GB GPU experiment: 20 RLVR iterations, 16 reward
-candidates per iteration, and 4096 Ant worlds per candidate.
+candidates per iteration, 4096 Ant worlds per candidate, and one PPO
+actor-critic network per reward candidate. The default MJWarp evaluator is
+`ppo`; the older lightweight evaluator remains available with
+`--mjwarp-evaluator search`. The PPO policy uses a shared MLP `[256, 128, 64]`
+with ELU activations, rollout horizon `32`, minibatch size `16384`, 4 PPO epochs,
+learning rate `3e-4`, GAE `0.95`, and clip range `0.2`.
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20

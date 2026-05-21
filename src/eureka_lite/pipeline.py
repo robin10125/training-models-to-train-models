@@ -21,8 +21,13 @@ class FullPipelineConfig:
     population: int
     generations: int
     worlds_per_candidate: int
+    mjwarp_evaluator: str
     mjwarp_episode_steps: int
     mjwarp_policy_iterations: int
+    mjwarp_ppo_horizon: int
+    mjwarp_ppo_epochs: int
+    mjwarp_ppo_minibatch_size: int
+    mjwarp_ppo_learning_rate: float
     mjwarp_elite_frac: float
     eval_episodes: int
     seed: int
@@ -82,8 +87,13 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
             load_in_4bit=config.load_in_4bit,
             sim_backend="mjwarp",
             worlds_per_candidate=config.worlds_per_candidate,
+            mjwarp_evaluator=config.mjwarp_evaluator,
             mjwarp_episode_steps=config.mjwarp_episode_steps,
             mjwarp_policy_iterations=config.mjwarp_policy_iterations,
+            mjwarp_ppo_horizon=config.mjwarp_ppo_horizon,
+            mjwarp_ppo_epochs=config.mjwarp_ppo_epochs,
+            mjwarp_ppo_minibatch_size=config.mjwarp_ppo_minibatch_size,
+            mjwarp_ppo_learning_rate=config.mjwarp_ppo_learning_rate,
             mjwarp_elite_frac=config.mjwarp_elite_frac,
             pause_path=pause_path,
             resume=collection_resume,
@@ -233,8 +243,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--population", type=int, default=16)
     parser.add_argument("--generations", type=int, default=1)
     parser.add_argument("--worlds-per-candidate", type=int, default=4096)
+    parser.add_argument("--mjwarp-evaluator", choices=["ppo", "search"], default="ppo")
     parser.add_argument("--mjwarp-episode-steps", type=int, default=500)
     parser.add_argument("--mjwarp-policy-iterations", type=int, default=4)
+    parser.add_argument("--mjwarp-ppo-horizon", type=int, default=32)
+    parser.add_argument("--mjwarp-ppo-epochs", type=int, default=4)
+    parser.add_argument("--mjwarp-ppo-minibatch-size", type=int, default=16_384)
+    parser.add_argument("--mjwarp-ppo-learning-rate", type=float, default=3e-4)
     parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--seed", type=int, default=7)
@@ -273,8 +288,13 @@ def main() -> None:
         population=args.population,
         generations=args.generations,
         worlds_per_candidate=args.worlds_per_candidate,
+        mjwarp_evaluator=args.mjwarp_evaluator,
         mjwarp_episode_steps=args.mjwarp_episode_steps,
         mjwarp_policy_iterations=args.mjwarp_policy_iterations,
+        mjwarp_ppo_horizon=args.mjwarp_ppo_horizon,
+        mjwarp_ppo_epochs=args.mjwarp_ppo_epochs,
+        mjwarp_ppo_minibatch_size=args.mjwarp_ppo_minibatch_size,
+        mjwarp_ppo_learning_rate=args.mjwarp_ppo_learning_rate,
         mjwarp_elite_frac=args.mjwarp_elite_frac,
         eval_episodes=args.eval_episodes,
         seed=args.seed,

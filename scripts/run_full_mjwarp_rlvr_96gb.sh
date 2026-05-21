@@ -12,8 +12,13 @@ ITERATIONS="${ITERATIONS:-3}"
 POPULATION="${POPULATION:-16}"
 GENERATIONS="${GENERATIONS:-1}"
 WORLDS_PER_CANDIDATE="${WORLDS_PER_CANDIDATE:-4096}"
+MJWARP_EVALUATOR="${MJWARP_EVALUATOR:-ppo}"
 MJWARP_EPISODE_STEPS="${MJWARP_EPISODE_STEPS:-500}"
 MJWARP_POLICY_ITERATIONS="${MJWARP_POLICY_ITERATIONS:-4}"
+MJWARP_PPO_HORIZON="${MJWARP_PPO_HORIZON:-32}"
+MJWARP_PPO_EPOCHS="${MJWARP_PPO_EPOCHS:-4}"
+MJWARP_PPO_MINIBATCH_SIZE="${MJWARP_PPO_MINIBATCH_SIZE:-16384}"
+MJWARP_PPO_LEARNING_RATE="${MJWARP_PPO_LEARNING_RATE:-3e-4}"
 MJWARP_ELITE_FRAC="${MJWARP_ELITE_FRAC:-0.1}"
 EVAL_EPISODES="${EVAL_EPISODES:-5}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
@@ -38,6 +43,13 @@ Options:
   --run-root PATH             Output directory for the iterative run.
   --population N              Reward candidates per iteration.
   --worlds-per-candidate N    Ant worlds per reward candidate.
+  --mjwarp-evaluator NAME     Evaluator: ppo or search. Default: ppo.
+  --mjwarp-ppo-horizon N      PPO rollout horizon before each update.
+  --mjwarp-ppo-epochs N       PPO optimization epochs per rollout batch.
+  --mjwarp-ppo-minibatch-size N
+                              PPO minibatch size.
+  --mjwarp-ppo-learning-rate X
+                              PPO learning rate.
   --allow-small-gpu           Run even if GPU memory is below the 96 GB default.
   --no-smoke-test             Skip the small MJWarp smoke test.
   --force-train               Retrain adapters even if trainer_metrics.json exists.
@@ -64,6 +76,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --worlds-per-candidate)
       WORLDS_PER_CANDIDATE="$2"
+      shift 2
+      ;;
+    --mjwarp-evaluator)
+      MJWARP_EVALUATOR="$2"
+      shift 2
+      ;;
+    --mjwarp-ppo-horizon)
+      MJWARP_PPO_HORIZON="$2"
+      shift 2
+      ;;
+    --mjwarp-ppo-epochs)
+      MJWARP_PPO_EPOCHS="$2"
+      shift 2
+      ;;
+    --mjwarp-ppo-minibatch-size)
+      MJWARP_PPO_MINIBATCH_SIZE="$2"
+      shift 2
+      ;;
+    --mjwarp-ppo-learning-rate)
+      MJWARP_PPO_LEARNING_RATE="$2"
       shift 2
       ;;
     --allow-small-gpu)
@@ -192,8 +224,13 @@ PIPELINE_ARGS=(
   --population "$POPULATION"
   --generations "$GENERATIONS"
   --worlds-per-candidate "$WORLDS_PER_CANDIDATE"
+  --mjwarp-evaluator "$MJWARP_EVALUATOR"
   --mjwarp-episode-steps "$MJWARP_EPISODE_STEPS"
   --mjwarp-policy-iterations "$MJWARP_POLICY_ITERATIONS"
+  --mjwarp-ppo-horizon "$MJWARP_PPO_HORIZON"
+  --mjwarp-ppo-epochs "$MJWARP_PPO_EPOCHS"
+  --mjwarp-ppo-minibatch-size "$MJWARP_PPO_MINIBATCH_SIZE"
+  --mjwarp-ppo-learning-rate "$MJWARP_PPO_LEARNING_RATE"
   --mjwarp-elite-frac "$MJWARP_ELITE_FRAC"
   --eval-episodes "$EVAL_EPISODES"
   --max-new-tokens "$MAX_NEW_TOKENS"

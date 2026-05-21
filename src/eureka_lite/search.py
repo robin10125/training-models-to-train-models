@@ -46,8 +46,13 @@ def train_and_evaluate(
     device: str,
     sim_backend: str = "sb3",
     worlds_per_candidate: int = 4096,
+    mjwarp_evaluator: str = "ppo",
     mjwarp_episode_steps: int = 500,
     mjwarp_policy_iterations: int = 4,
+    mjwarp_ppo_horizon: int = 32,
+    mjwarp_ppo_epochs: int = 4,
+    mjwarp_ppo_minibatch_size: int = 16_384,
+    mjwarp_ppo_learning_rate: float = 3.0e-4,
     mjwarp_elite_frac: float = 0.1,
 ) -> CandidateResult:
     started_at = time.monotonic()
@@ -73,9 +78,14 @@ def train_and_evaluate(
             candidate,
             MjwarpEvaluatorConfig(
                 task=task,
+                evaluator=mjwarp_evaluator,
                 worlds_per_candidate=worlds_per_candidate,
                 episode_steps=mjwarp_episode_steps,
                 policy_iterations=mjwarp_policy_iterations,
+                ppo_horizon=mjwarp_ppo_horizon,
+                ppo_epochs=mjwarp_ppo_epochs,
+                ppo_minibatch_size=mjwarp_ppo_minibatch_size,
+                ppo_learning_rate=mjwarp_ppo_learning_rate,
                 elite_frac=mjwarp_elite_frac,
                 seed=seed,
                 device=warp_device,
@@ -161,8 +171,13 @@ class RunConfig:
     load_in_4bit: bool
     sim_backend: str = "sb3"
     worlds_per_candidate: int = 4096
+    mjwarp_evaluator: str = "ppo"
     mjwarp_episode_steps: int = 500
     mjwarp_policy_iterations: int = 4
+    mjwarp_ppo_horizon: int = 32
+    mjwarp_ppo_epochs: int = 4
+    mjwarp_ppo_minibatch_size: int = 16_384
+    mjwarp_ppo_learning_rate: float = 3.0e-4
     mjwarp_elite_frac: float = 0.1
 
 
@@ -186,8 +201,13 @@ def run_search(
     load_in_4bit: bool = True,
     sim_backend: str = "sb3",
     worlds_per_candidate: int = 4096,
+    mjwarp_evaluator: str = "ppo",
     mjwarp_episode_steps: int = 500,
     mjwarp_policy_iterations: int = 4,
+    mjwarp_ppo_horizon: int = 32,
+    mjwarp_ppo_epochs: int = 4,
+    mjwarp_ppo_minibatch_size: int = 16_384,
+    mjwarp_ppo_learning_rate: float = 3.0e-4,
     mjwarp_elite_frac: float = 0.1,
     pause_path: Path | None = None,
     resume: bool = False,
@@ -213,8 +233,13 @@ def run_search(
         load_in_4bit = bool(checkpoint_config["load_in_4bit"])
         sim_backend = checkpoint_config.get("sim_backend", "sb3")
         worlds_per_candidate = int(checkpoint_config.get("worlds_per_candidate", 4096))
+        mjwarp_evaluator = checkpoint_config.get("mjwarp_evaluator", "ppo")
         mjwarp_episode_steps = int(checkpoint_config.get("mjwarp_episode_steps", 500))
         mjwarp_policy_iterations = int(checkpoint_config.get("mjwarp_policy_iterations", 4))
+        mjwarp_ppo_horizon = int(checkpoint_config.get("mjwarp_ppo_horizon", 32))
+        mjwarp_ppo_epochs = int(checkpoint_config.get("mjwarp_ppo_epochs", 4))
+        mjwarp_ppo_minibatch_size = int(checkpoint_config.get("mjwarp_ppo_minibatch_size", 16_384))
+        mjwarp_ppo_learning_rate = float(checkpoint_config.get("mjwarp_ppo_learning_rate", 3.0e-4))
         mjwarp_elite_frac = float(checkpoint_config.get("mjwarp_elite_frac", 0.1))
 
     run_config = RunConfig(
@@ -235,8 +260,13 @@ def run_search(
         load_in_4bit=load_in_4bit,
         sim_backend=sim_backend,
         worlds_per_candidate=worlds_per_candidate,
+        mjwarp_evaluator=mjwarp_evaluator,
         mjwarp_episode_steps=mjwarp_episode_steps,
         mjwarp_policy_iterations=mjwarp_policy_iterations,
+        mjwarp_ppo_horizon=mjwarp_ppo_horizon,
+        mjwarp_ppo_epochs=mjwarp_ppo_epochs,
+        mjwarp_ppo_minibatch_size=mjwarp_ppo_minibatch_size,
+        mjwarp_ppo_learning_rate=mjwarp_ppo_learning_rate,
         mjwarp_elite_frac=mjwarp_elite_frac,
     )
     rng = random.Random(seed)
@@ -321,8 +351,13 @@ def run_search(
                 device=device,
                 sim_backend=sim_backend,
                 worlds_per_candidate=worlds_per_candidate,
+                mjwarp_evaluator=mjwarp_evaluator,
                 mjwarp_episode_steps=mjwarp_episode_steps,
                 mjwarp_policy_iterations=mjwarp_policy_iterations,
+                mjwarp_ppo_horizon=mjwarp_ppo_horizon,
+                mjwarp_ppo_epochs=mjwarp_ppo_epochs,
+                mjwarp_ppo_minibatch_size=mjwarp_ppo_minibatch_size,
+                mjwarp_ppo_learning_rate=mjwarp_ppo_learning_rate,
                 mjwarp_elite_frac=mjwarp_elite_frac,
             )
             generation_results.append(result)
@@ -415,8 +450,13 @@ def run_candidate_safely(
     device: str,
     sim_backend: str = "sb3",
     worlds_per_candidate: int = 4096,
+    mjwarp_evaluator: str = "ppo",
     mjwarp_episode_steps: int = 500,
     mjwarp_policy_iterations: int = 4,
+    mjwarp_ppo_horizon: int = 32,
+    mjwarp_ppo_epochs: int = 4,
+    mjwarp_ppo_minibatch_size: int = 16_384,
+    mjwarp_ppo_learning_rate: float = 3.0e-4,
     mjwarp_elite_frac: float = 0.1,
 ) -> CandidateResult:
     try:
@@ -430,8 +470,13 @@ def run_candidate_safely(
             device=device,
             sim_backend=sim_backend,
             worlds_per_candidate=worlds_per_candidate,
+            mjwarp_evaluator=mjwarp_evaluator,
             mjwarp_episode_steps=mjwarp_episode_steps,
             mjwarp_policy_iterations=mjwarp_policy_iterations,
+            mjwarp_ppo_horizon=mjwarp_ppo_horizon,
+            mjwarp_ppo_epochs=mjwarp_ppo_epochs,
+            mjwarp_ppo_minibatch_size=mjwarp_ppo_minibatch_size,
+            mjwarp_ppo_learning_rate=mjwarp_ppo_learning_rate,
             mjwarp_elite_frac=mjwarp_elite_frac,
         )
     except Exception as exc:
