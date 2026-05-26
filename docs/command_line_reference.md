@@ -28,13 +28,18 @@ python -m eureka_lite.pipeline [options]
 | `--worlds-per-candidate` | `4096` | Parallel Ant worlds trained for each reward program. |
 | `--mjwarp-evaluator` | `ppo` | Policy optimizer: `ppo` or legacy `search`. |
 | `--mjwarp-episode-steps` | `500` | World horizon for policy training. |
-| `--mjwarp-policy-iterations` | `4` | Policy training iterations. |
+| `--mjwarp-policy-iterations` | `96` | Policy training iterations; serious default yields `196,608,000` control transitions per candidate with `4096` worlds and `500` steps. |
 | `--mjwarp-ppo-horizon` | `32` | PPO rollout horizon before an update. |
 | `--mjwarp-ppo-epochs` | `4` | PPO optimization epochs per rollout batch. |
 | `--mjwarp-ppo-minibatch-size` | `16384` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate` | `3e-4` | PPO learning rate. |
 | `--mjwarp-elite-frac` | `0.1` | Elite fraction used only by legacy `search`. |
-| `--eval-episodes` | `5` | Gym evaluation episodes used for verified return. |
+| `--mjwarp-rollout-mode` | `gpu` | PPO rollout implementation: GPU-resident `gpu` or NumPy reference `host`. |
+| `--mjwarp-verified-evaluator` | `gym` | Verified return implementation: reference `gym` or batched `mjwarp`. |
+| `--mjwarp-verification-steps` | `1000` | Episode horizon used by batched MJWarp verification. |
+| `--no-mjwarp-candidate-batching` | off | Disable default generation-level GPU PPO batching; evaluate candidate policies sequentially. |
+| `--no-mjwarp-cuda-graph` | off | Disable default CUDA graph replay for repeated MuJoCo physics substeps. |
+| `--eval-episodes` | `5` | Evaluation episodes used for verified return. |
 
 ### Generation and Negative Sample Options
 
@@ -86,10 +91,17 @@ Supported script options:
 | `--eureka-elites N` | Ranked elites in refinement prompts. |
 | `--worlds-per-candidate N` | Parallel Ant worlds for each candidate. |
 | `--mjwarp-evaluator NAME` | `ppo` or `search`. |
+| `--mjwarp-episode-steps N` | Ant control steps per policy iteration; default `500`. |
+| `--mjwarp-policy-iterations N` | Policy iterations per candidate; default `96`. |
 | `--mjwarp-ppo-horizon N` | PPO rollout horizon. |
 | `--mjwarp-ppo-epochs N` | PPO update epochs. |
 | `--mjwarp-ppo-minibatch-size N` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate X` | PPO learning rate. |
+| `--mjwarp-rollout-mode NAME` | `gpu` or `host`; defaults to GPU-resident PPO. |
+| `--mjwarp-verified-evaluator NAME` | `gym` or `mjwarp`; defaults to reference Gym verification. |
+| `--mjwarp-verification-steps N` | Horizon for MJWarp verification. |
+| `--no-mjwarp-candidate-batching` | Disable generation-level GPU PPO candidate batching. |
+| `--no-mjwarp-cuda-graph` | Disable physics CUDA graph replay. |
 | `--no-negative-rlvr-samples` | Disable invalid/failed model-update examples. |
 | `--negative-rlvr-margin X` | Configure their penalty margin. |
 | `--allow-small-gpu` | Bypass the 96 GB memory preflight. |
@@ -99,8 +111,8 @@ Supported script options:
 
 The same script defaults can be set using uppercase environment variables,
 including `ITERATIONS`, `POPULATION`, `GENERATIONS`, `EUREKA_ELITES`,
-`WORLDS_PER_CANDIDATE`, `INCLUDE_NEGATIVE_RLVR_SAMPLES`, and
-`NEGATIVE_RLVR_MARGIN`.
+`WORLDS_PER_CANDIDATE`, `MJWARP_BATCH_CANDIDATES`, `MJWARP_CUDA_GRAPH`,
+`INCLUDE_NEGATIVE_RLVR_SAMPLES`, and `NEGATIVE_RLVR_MARGIN`.
 
 ## Standalone Reward Search
 
@@ -124,12 +136,17 @@ python -m eureka_lite [options]
 | `--worlds-per-candidate` | `4096` | MJWarp Ant worlds per candidate. |
 | `--mjwarp-evaluator` | `ppo` | `ppo` or `search`. |
 | `--mjwarp-episode-steps` | `500` | MJWarp policy horizon. |
-| `--mjwarp-policy-iterations` | `4` | MJWarp policy iterations. |
+| `--mjwarp-policy-iterations` | `96` | MJWarp policy iterations. |
 | `--mjwarp-ppo-horizon` | `32` | PPO rollout horizon. |
 | `--mjwarp-ppo-epochs` | `4` | PPO epochs. |
 | `--mjwarp-ppo-minibatch-size` | `16384` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate` | `3e-4` | PPO learning rate. |
 | `--mjwarp-elite-frac` | `0.1` | Legacy search elite fraction. |
+| `--mjwarp-rollout-mode` | `gpu` | `gpu` or `host` PPO rollout. |
+| `--mjwarp-verified-evaluator` | `gym` | `gym` or `mjwarp` verified return. |
+| `--mjwarp-verification-steps` | `1000` | Horizon for batched MJWarp verification. |
+| `--no-mjwarp-candidate-batching` | off | Disable generation-level GPU PPO candidate batching. |
+| `--no-mjwarp-cuda-graph` | off | Disable repeated-physics CUDA graph replay. |
 | `--no-negative-rlvr-samples` | off | Exclude invalid/failed samples from output training records. |
 | `--negative-rlvr-margin` | `1.0` | Negative sample penalty margin. |
 | `--output-dir` | `runs/latest` | Collection output directory. |

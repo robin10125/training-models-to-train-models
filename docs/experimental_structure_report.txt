@@ -71,9 +71,11 @@ The serious experiment is designed around repeated verified feedback rather
 than a single batch. A one-shot collect-then-train run can demonstrate that the
 plumbing works, but it does not fully test whether the model improves as a
 reward designer. The intended run uses 20 RLVR iterations, with 16 reward
-candidates per iteration and 4096 Ant worlds per candidate. This gives each
-iteration a meaningful group of alternatives and enough simulation scale to
-reduce the noise in candidate evaluation.
+candidates per EUREKA generation and 4096 Ant worlds per candidate. Each
+candidate receives 196,608,000 Ant control transitions during inner PPO
+training. Candidates in the same generation share policy-training and
+verified-evaluation seeds, so their returns form a paired comparison of reward
+code rather than different random initializations.
 
 MuJoCo Warp is used because the expensive part of the experiment is not model
 fine-tuning; it is evaluating many reward functions through simulation. Each

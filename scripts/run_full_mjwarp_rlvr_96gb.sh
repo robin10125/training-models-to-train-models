@@ -15,12 +15,17 @@ EUREKA_ELITES="${EUREKA_ELITES:-4}"
 WORLDS_PER_CANDIDATE="${WORLDS_PER_CANDIDATE:-4096}"
 MJWARP_EVALUATOR="${MJWARP_EVALUATOR:-ppo}"
 MJWARP_EPISODE_STEPS="${MJWARP_EPISODE_STEPS:-500}"
-MJWARP_POLICY_ITERATIONS="${MJWARP_POLICY_ITERATIONS:-4}"
+MJWARP_POLICY_ITERATIONS="${MJWARP_POLICY_ITERATIONS:-96}"
 MJWARP_PPO_HORIZON="${MJWARP_PPO_HORIZON:-32}"
 MJWARP_PPO_EPOCHS="${MJWARP_PPO_EPOCHS:-4}"
 MJWARP_PPO_MINIBATCH_SIZE="${MJWARP_PPO_MINIBATCH_SIZE:-16384}"
 MJWARP_PPO_LEARNING_RATE="${MJWARP_PPO_LEARNING_RATE:-3e-4}"
 MJWARP_ELITE_FRAC="${MJWARP_ELITE_FRAC:-0.1}"
+MJWARP_ROLLOUT_MODE="${MJWARP_ROLLOUT_MODE:-gpu}"
+MJWARP_VERIFIED_EVALUATOR="${MJWARP_VERIFIED_EVALUATOR:-gym}"
+MJWARP_VERIFICATION_STEPS="${MJWARP_VERIFICATION_STEPS:-1000}"
+MJWARP_BATCH_CANDIDATES="${MJWARP_BATCH_CANDIDATES:-1}"
+MJWARP_CUDA_GRAPH="${MJWARP_CUDA_GRAPH:-1}"
 INCLUDE_NEGATIVE_RLVR_SAMPLES="${INCLUDE_NEGATIVE_RLVR_SAMPLES:-1}"
 NEGATIVE_RLVR_MARGIN="${NEGATIVE_RLVR_MARGIN:-1.0}"
 EVAL_EPISODES="${EVAL_EPISODES:-5}"
@@ -49,12 +54,23 @@ Options:
   --eureka-elites N           Ranked elites included in each refinement prompt.
   --worlds-per-candidate N    Ant worlds per reward candidate.
   --mjwarp-evaluator NAME     Evaluator: ppo or search. Default: ppo.
+  --mjwarp-episode-steps N    PPO control steps per policy iteration. Default: 500.
+  --mjwarp-policy-iterations N
+                              Policy iterations per candidate. Default: 96.
   --mjwarp-ppo-horizon N      PPO rollout horizon before each update.
   --mjwarp-ppo-epochs N       PPO optimization epochs per rollout batch.
   --mjwarp-ppo-minibatch-size N
                               PPO minibatch size.
   --mjwarp-ppo-learning-rate X
                               PPO learning rate.
+  --mjwarp-rollout-mode NAME  gpu or host. Default: gpu.
+  --mjwarp-verified-evaluator NAME
+                              mjwarp or gym. Default: gym.
+  --mjwarp-verification-steps N
+                              Verified rollout horizon. Default: 1000.
+  --no-mjwarp-candidate-batching
+                              Evaluate candidates sequentially instead of in one GPU batch.
+  --no-mjwarp-cuda-graph     Disable physics CUDA-graph replay.
   --no-negative-rlvr-samples Do not train the model on invalid/failed reward programs.
   --negative-rlvr-margin X   Penalty below the worst successful candidate. Default: 1.0.
   --allow-small-gpu           Run even if GPU memory is below the 96 GB default.
@@ -97,6 +113,14 @@ while [[ $# -gt 0 ]]; do
       MJWARP_EVALUATOR="$2"
       shift 2
       ;;
+    --mjwarp-episode-steps)
+      MJWARP_EPISODE_STEPS="$2"
+      shift 2
+      ;;
+    --mjwarp-policy-iterations)
+      MJWARP_POLICY_ITERATIONS="$2"
+      shift 2
+      ;;
     --mjwarp-ppo-horizon)
       MJWARP_PPO_HORIZON="$2"
       shift 2
@@ -112,6 +136,26 @@ while [[ $# -gt 0 ]]; do
     --mjwarp-ppo-learning-rate)
       MJWARP_PPO_LEARNING_RATE="$2"
       shift 2
+      ;;
+    --mjwarp-rollout-mode)
+      MJWARP_ROLLOUT_MODE="$2"
+      shift 2
+      ;;
+    --mjwarp-verified-evaluator)
+      MJWARP_VERIFIED_EVALUATOR="$2"
+      shift 2
+      ;;
+    --mjwarp-verification-steps)
+      MJWARP_VERIFICATION_STEPS="$2"
+      shift 2
+      ;;
+    --no-mjwarp-candidate-batching)
+      MJWARP_BATCH_CANDIDATES=0
+      shift
+      ;;
+    --no-mjwarp-cuda-graph)
+      MJWARP_CUDA_GRAPH=0
+      shift
       ;;
     --no-negative-rlvr-samples)
       INCLUDE_NEGATIVE_RLVR_SAMPLES=0
@@ -255,6 +299,9 @@ PIPELINE_ARGS=(
   --mjwarp-ppo-minibatch-size "$MJWARP_PPO_MINIBATCH_SIZE"
   --mjwarp-ppo-learning-rate "$MJWARP_PPO_LEARNING_RATE"
   --mjwarp-elite-frac "$MJWARP_ELITE_FRAC"
+  --mjwarp-rollout-mode "$MJWARP_ROLLOUT_MODE"
+  --mjwarp-verified-evaluator "$MJWARP_VERIFIED_EVALUATOR"
+  --mjwarp-verification-steps "$MJWARP_VERIFICATION_STEPS"
   --negative-rlvr-margin "$NEGATIVE_RLVR_MARGIN"
   --eval-episodes "$EVAL_EPISODES"
   --max-new-tokens "$MAX_NEW_TOKENS"
@@ -276,6 +323,12 @@ if [[ "$OVERWRITE_COLLECTION" == "1" ]]; then
 fi
 if [[ "$INCLUDE_NEGATIVE_RLVR_SAMPLES" != "1" ]]; then
   PIPELINE_ARGS+=(--no-negative-rlvr-samples)
+fi
+if [[ "$MJWARP_BATCH_CANDIDATES" != "1" ]]; then
+  PIPELINE_ARGS+=(--no-mjwarp-candidate-batching)
+fi
+if [[ "$MJWARP_CUDA_GRAPH" != "1" ]]; then
+  PIPELINE_ARGS+=(--no-mjwarp-cuda-graph)
 fi
 
 log "Starting full MJWarp EUREKA/RLVR pipeline"

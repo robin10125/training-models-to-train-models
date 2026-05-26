@@ -32,6 +32,11 @@ class FullPipelineConfig:
     mjwarp_ppo_minibatch_size: int
     mjwarp_ppo_learning_rate: float
     mjwarp_elite_frac: float
+    mjwarp_rollout_mode: str
+    mjwarp_verified_evaluator: str
+    mjwarp_verification_steps: int
+    mjwarp_batch_candidates: bool
+    mjwarp_cuda_graph: bool
     include_negative_rlvr_samples: bool
     negative_rlvr_margin: float
     eval_episodes: int
@@ -169,6 +174,11 @@ def collection_config(config: FullPipelineConfig, iteration: int, adapter_path: 
         mjwarp_ppo_minibatch_size=config.mjwarp_ppo_minibatch_size,
         mjwarp_ppo_learning_rate=config.mjwarp_ppo_learning_rate,
         mjwarp_elite_frac=config.mjwarp_elite_frac,
+        mjwarp_rollout_mode=config.mjwarp_rollout_mode,
+        mjwarp_verified_evaluator=config.mjwarp_verified_evaluator,
+        mjwarp_verification_steps=config.mjwarp_verification_steps,
+        mjwarp_batch_candidates=config.mjwarp_batch_candidates,
+        mjwarp_cuda_graph=config.mjwarp_cuda_graph,
         include_negative_rlvr_samples=config.include_negative_rlvr_samples,
         negative_rlvr_margin=config.negative_rlvr_margin,
     )
@@ -311,6 +321,11 @@ def main() -> None:
         mjwarp_ppo_minibatch_size=args.mjwarp_ppo_minibatch_size,
         mjwarp_ppo_learning_rate=args.mjwarp_ppo_learning_rate,
         mjwarp_elite_frac=args.mjwarp_elite_frac,
+        mjwarp_rollout_mode=args.mjwarp_rollout_mode,
+        mjwarp_verified_evaluator=args.mjwarp_verified_evaluator,
+        mjwarp_verification_steps=args.mjwarp_verification_steps,
+        mjwarp_batch_candidates=not args.no_mjwarp_candidate_batching,
+        mjwarp_cuda_graph=not args.no_mjwarp_cuda_graph,
         include_negative_rlvr_samples=not args.no_negative_rlvr_samples,
         negative_rlvr_margin=args.negative_rlvr_margin,
         eval_episodes=args.eval_episodes,

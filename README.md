@@ -26,8 +26,12 @@ failed evaluations are included as penalized RLVR samples by default.
 
 Design rationale is documented in [docs/design_decisions.md](docs/design_decisions.md).
 All run flags are listed in [docs/command_line_reference.md](docs/command_line_reference.md).
-The GPU-resident Ant PPO refactor is planned in
+The GPU-resident Ant PPO implementation and remaining validation work are tracked in
 [docs/gpu_rollout_optimization_plan.md](docs/gpu_rollout_optimization_plan.md).
+The paired-seed and policy-budget settings used for stable RLVR rewards are
+documented in [docs/eureka_signal_stability.md](docs/eureka_signal_stability.md).
+The generation-level GPU candidate batching change is documented in
+[docs/candidate_batched_gpu_evaluation_change.md](docs/candidate_batched_gpu_evaluation_change.md).
 
 ## Setup
 
@@ -55,12 +59,13 @@ python -m pip install -e ".[mjwarp]"
 
 Use this for a 3-iteration smoke test on a 96 GB GPU. It uses the full candidate
 and Ant-world batch size, with 3 EUREKA generations and 4 elites per RLVR
-iteration.
+iteration, but shortens inner PPO training for validation only.
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
   --run-root runs/smoke_96gb_mjwarp_rlvr \
-  --iterations 3
+  --iterations 3 \
+  --mjwarp-policy-iterations 4
 ```
 
 ## Serious Run
@@ -68,16 +73,37 @@ iteration.
 Use this for the intended 96 GB GPU experiment: 20 RLVR iterations, 16 reward
 candidates per EUREKA generation, 3 EUREKA generations per RLVR iteration, 4
 ranked elites in each refinement prompt, 4096 Ant worlds per candidate, and one
-PPO actor-critic network per reward candidate. The default MJWarp evaluator is
+PPO actor-critic network per reward candidate. Each reward candidate receives
+`196,608,000` Ant control transitions (`4096 * 500 * 96`), and candidates in
+the same EUREKA generation use a common policy/evaluation seed for paired
+ranking. The default MJWarp evaluator is
 `ppo`; the older lightweight evaluator remains available with
 `--mjwarp-evaluator search`.
+PPO rollouts use the GPU-resident Torch/MuJoCo Warp path by default. Verified
+reward is still evaluated through Gym's original `Ant-v5` return by default;
+the batched MJWarp verifier is available for measured validation runs.
+The GPU PPO path batches the `16` candidate policies into one simulator job
+(`65536` total worlds) while retaining `4096` worlds and one independent policy
+per candidate. MuJoCo physics substeps use CUDA graph replay by default.
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20
 ```
 
 The serious run defaults can be changed with `--generations`, `--eureka-elites`,
-`--population`, and `--worlds-per-candidate`.
+`--population`, `--worlds-per-candidate`, and `--mjwarp-policy-iterations`.
+Use `--no-mjwarp-candidate-batching` or `--no-mjwarp-cuda-graph` for
+sequential/capture-disabled ablations.
+
+Use the device verifier only when intentionally validating its agreement with
+the Gym reference:
+
+```bash
+./scripts/run_full_mjwarp_rlvr_96gb.sh \
+  --iterations 3 \
+  --mjwarp-verified-evaluator mjwarp \
+  --mjwarp-verification-steps 1000
+```
 
 To exclude invalid code and failed evaluations from model updates for an
 ablation run:
@@ -100,7 +126,9 @@ Pause a running 96 GB pipeline:
 touch runs/deepseek_lite_ant_mjwarp_rlvr/PAUSE
 ```
 
-The process exits cleanly after the current reward candidate or trainer epoch.
+The process exits cleanly after the current candidate batch or trainer epoch.
+With the default GPU batching, the batch is one EUREKA generation; pass
+`--no-mjwarp-candidate-batching` for candidate-by-candidate pause boundaries.
 
 Resume:
 

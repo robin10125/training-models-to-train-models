@@ -47,12 +47,17 @@ class CandidateEvaluationConfig:
     worlds_per_candidate: int = 4096
     mjwarp_evaluator: str = "ppo"
     mjwarp_episode_steps: int = 500
-    mjwarp_policy_iterations: int = 4
+    mjwarp_policy_iterations: int = 96
     mjwarp_ppo_horizon: int = 32
     mjwarp_ppo_epochs: int = 4
     mjwarp_ppo_minibatch_size: int = 16_384
     mjwarp_ppo_learning_rate: float = 3.0e-4
     mjwarp_elite_frac: float = 0.1
+    mjwarp_rollout_mode: str = "gpu"
+    mjwarp_verified_evaluator: str = "gym"
+    mjwarp_verification_steps: int = 1000
+    mjwarp_batch_candidates: bool = True
+    mjwarp_cuda_graph: bool = True
 
 
 @dataclass(frozen=True)
@@ -77,12 +82,17 @@ class RunConfig:
     worlds_per_candidate: int = 4096
     mjwarp_evaluator: str = "ppo"
     mjwarp_episode_steps: int = 500
-    mjwarp_policy_iterations: int = 4
+    mjwarp_policy_iterations: int = 96
     mjwarp_ppo_horizon: int = 32
     mjwarp_ppo_epochs: int = 4
     mjwarp_ppo_minibatch_size: int = 16_384
     mjwarp_ppo_learning_rate: float = 3.0e-4
     mjwarp_elite_frac: float = 0.1
+    mjwarp_rollout_mode: str = "gpu"
+    mjwarp_verified_evaluator: str = "gym"
+    mjwarp_verification_steps: int = 1000
+    mjwarp_batch_candidates: bool = True
+    mjwarp_cuda_graph: bool = True
     include_negative_rlvr_samples: bool = True
     negative_rlvr_margin: float = 1.0
 
@@ -109,12 +119,17 @@ class RunConfig:
             worlds_per_candidate=int(row.get("worlds_per_candidate", 4096)),
             mjwarp_evaluator=row.get("mjwarp_evaluator", "ppo"),
             mjwarp_episode_steps=int(row.get("mjwarp_episode_steps", 500)),
-            mjwarp_policy_iterations=int(row.get("mjwarp_policy_iterations", 4)),
+            mjwarp_policy_iterations=int(row.get("mjwarp_policy_iterations", 96)),
             mjwarp_ppo_horizon=int(row.get("mjwarp_ppo_horizon", 32)),
             mjwarp_ppo_epochs=int(row.get("mjwarp_ppo_epochs", 4)),
             mjwarp_ppo_minibatch_size=int(row.get("mjwarp_ppo_minibatch_size", 16_384)),
             mjwarp_ppo_learning_rate=float(row.get("mjwarp_ppo_learning_rate", 3.0e-4)),
             mjwarp_elite_frac=float(row.get("mjwarp_elite_frac", 0.1)),
+            mjwarp_rollout_mode=row.get("mjwarp_rollout_mode", "gpu"),
+            mjwarp_verified_evaluator=row.get("mjwarp_verified_evaluator", "gym"),
+            mjwarp_verification_steps=int(row.get("mjwarp_verification_steps", 1000)),
+            mjwarp_batch_candidates=bool(row.get("mjwarp_batch_candidates", True)),
+            mjwarp_cuda_graph=bool(row.get("mjwarp_cuda_graph", True)),
             include_negative_rlvr_samples=bool(row.get("include_negative_rlvr_samples", True)),
             negative_rlvr_margin=float(row.get("negative_rlvr_margin", 1.0)),
         )
@@ -137,6 +152,11 @@ class RunConfig:
             mjwarp_ppo_minibatch_size=self.mjwarp_ppo_minibatch_size,
             mjwarp_ppo_learning_rate=self.mjwarp_ppo_learning_rate,
             mjwarp_elite_frac=self.mjwarp_elite_frac,
+            mjwarp_rollout_mode=self.mjwarp_rollout_mode,
+            mjwarp_verified_evaluator=self.mjwarp_verified_evaluator,
+            mjwarp_verification_steps=self.mjwarp_verification_steps,
+            mjwarp_batch_candidates=self.mjwarp_batch_candidates,
+            mjwarp_cuda_graph=self.mjwarp_cuda_graph,
         )
 
 
@@ -160,26 +180,11 @@ def train_and_evaluate(
         )
 
     if config.sim_backend == "mjwarp":
-        from .mjwarp_evaluator import MjwarpEvaluatorConfig, train_and_evaluate_mjwarp
+        from .mjwarp_evaluator import train_and_evaluate_mjwarp
 
-        warp_device = "cuda:0" if config.device in {"auto", "cuda"} else config.device
         result = train_and_evaluate_mjwarp(
             candidate,
-            MjwarpEvaluatorConfig(
-                task=config.task,
-                evaluator=config.mjwarp_evaluator,
-                worlds_per_candidate=config.worlds_per_candidate,
-                episode_steps=config.mjwarp_episode_steps,
-                policy_iterations=config.mjwarp_policy_iterations,
-                ppo_horizon=config.mjwarp_ppo_horizon,
-                ppo_epochs=config.mjwarp_ppo_epochs,
-                ppo_minibatch_size=config.mjwarp_ppo_minibatch_size,
-                ppo_learning_rate=config.mjwarp_ppo_learning_rate,
-                elite_frac=config.mjwarp_elite_frac,
-                seed=config.seed,
-                device=warp_device,
-                eval_episodes=config.eval_episodes,
-            ),
+            mjwarp_evaluator_config(config),
         )
         return CandidateResult(
             candidate=candidate,
@@ -242,6 +247,31 @@ def train_and_evaluate(
         seed=config.seed,
         task=config.task,
         elapsed_seconds=time.monotonic() - started_at,
+    )
+
+
+def mjwarp_evaluator_config(config: CandidateEvaluationConfig) -> Any:
+    from .mjwarp_evaluator import MjwarpEvaluatorConfig
+
+    warp_device = "cuda:0" if config.device in {"auto", "cuda"} else config.device
+    return MjwarpEvaluatorConfig(
+        task=config.task,
+        evaluator=config.mjwarp_evaluator,
+        worlds_per_candidate=config.worlds_per_candidate,
+        episode_steps=config.mjwarp_episode_steps,
+        policy_iterations=config.mjwarp_policy_iterations,
+        ppo_horizon=config.mjwarp_ppo_horizon,
+        ppo_epochs=config.mjwarp_ppo_epochs,
+        ppo_minibatch_size=config.mjwarp_ppo_minibatch_size,
+        ppo_learning_rate=config.mjwarp_ppo_learning_rate,
+        elite_frac=config.mjwarp_elite_frac,
+        rollout_mode=config.mjwarp_rollout_mode,
+        verified_evaluator=config.mjwarp_verified_evaluator,
+        verification_steps=config.mjwarp_verification_steps,
+        use_cuda_graph=config.mjwarp_cuda_graph,
+        seed=config.seed,
+        device=warp_device,
+        eval_episodes=config.eval_episodes,
     )
 
 
@@ -326,7 +356,8 @@ def run_search(
             )
             pending_rejections = hf_generator.drain_rejected_candidates()
         generation_results = []
-        for idx, candidate in enumerate(candidates):
+        pending_candidates = []
+        for candidate in candidates:
             key = result_key(generation, candidate.name)
             if key in completed_keys:
                 existing = next(result for result in all_results if result_key(result.candidate.generation, result.candidate.name) == key)
@@ -336,45 +367,51 @@ def run_search(
                 continue
             log_event(output_dir, "candidate_started", {"generation": generation, "candidate": candidate.name})
             log_message(output_dir, f"generation {generation} candidate {candidate.name} started")
-            result = run_candidate_safely(
-                candidate,
-                config.evaluation_config(config.seed + generation * 100 + idx),
-            )
-            generation_results.append(result)
-            all_results.append(result)
-            completed_keys.add(key)
-            append_rlvr_record(output_dir, result)
-            log_event(
-                output_dir,
-                "candidate_finished",
-                {
-                    "generation": generation,
-                    "candidate": candidate.name,
-                    "status": result.status,
-                    "mean_reward": result.mean_reward,
-                    "elapsed_seconds": result.elapsed_seconds,
-                },
-            )
-            log_message(
-                output_dir,
-                f"generation {generation} candidate {candidate.name} finished: "
-                f"status={result.status} mean_reward={result.mean_reward} elapsed_seconds={result.elapsed_seconds}",
-            )
-            write_results(output_dir, all_results)
-            save_checkpoint(
-                output_dir,
-                config,
-                results=all_results,
-                next_generation=generation,
-                next_candidates=candidates,
-                best_expression=best_expression,
-                best_score=best_score,
-                elite_context=elite_context,
-                evolution_feedback=evolution_feedback,
-            )
+            pending_candidates.append(candidate)
+        evaluation_config = config.evaluation_config(config.seed + generation * 100)
+        evaluation_groups = (
+            [pending_candidates] if candidates_can_be_batched(pending_candidates, evaluation_config) else [[item] for item in pending_candidates]
+        )
+        for candidate_group in evaluation_groups:
+            pending_results = run_candidates_safely(candidate_group, evaluation_config)
+            for candidate, result in zip(candidate_group, pending_results, strict=True):
+                key = result_key(generation, candidate.name)
+                generation_results.append(result)
+                all_results.append(result)
+                completed_keys.add(key)
+                append_rlvr_record(output_dir, result)
+                log_event(
+                    output_dir,
+                    "candidate_finished",
+                    {
+                        "generation": generation,
+                        "candidate": candidate.name,
+                        "status": result.status,
+                        "mean_reward": result.mean_reward,
+                        "elapsed_seconds": result.elapsed_seconds,
+                    },
+                )
+                log_message(
+                    output_dir,
+                    f"generation {generation} candidate {candidate.name} finished: "
+                    f"status={result.status} mean_reward={result.mean_reward} elapsed_seconds={result.elapsed_seconds}",
+                )
+                write_results(output_dir, all_results)
+                save_checkpoint(
+                    output_dir,
+                    config,
+                    results=all_results,
+                    next_generation=generation,
+                    next_candidates=candidates,
+                    best_expression=best_expression,
+                    best_score=best_score,
+                    elite_context=elite_context,
+                    evolution_feedback=evolution_feedback,
+                )
             if pause_requested(pause_path):
-                log_event(output_dir, "run_paused", {"generation": generation, "candidate": candidate.name})
-                log_message(output_dir, f"run paused after generation {generation} candidate {candidate.name}")
+                last_candidate = candidate_group[-1]
+                log_event(output_dir, "run_paused", {"generation": generation, "candidate": last_candidate.name})
+                log_message(output_dir, f"run paused after generation {generation} candidate {last_candidate.name}")
                 return all_results
 
         if config.include_negative_rlvr_samples:
@@ -506,6 +543,65 @@ def run_candidate_safely(
             error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
             metadata={"sim_backend": config.sim_backend},
         )
+
+
+def run_candidates_safely(
+    candidates: list[RewardCandidate],
+    config: CandidateEvaluationConfig,
+) -> list[CandidateResult]:
+    if not candidates:
+        return []
+    if not candidates_can_be_batched(candidates, config):
+        return [run_candidate_safely(candidate, config) for candidate in candidates]
+    try:
+        from .mjwarp_evaluator import train_and_evaluate_mjwarp_batch
+
+        rows = train_and_evaluate_mjwarp_batch(candidates, mjwarp_evaluator_config(config))
+        return [
+            CandidateResult(
+                candidate=candidate,
+                mean_reward=row["mean_reward"],
+                std_reward=row["std_reward"],
+                episode_rewards=row["episode_rewards"],
+                timesteps=int(row["metadata"]["training_world_steps"]),
+                seed=config.seed,
+                task=config.task,
+                elapsed_seconds=row["elapsed_seconds"],
+                metadata=row["metadata"],
+            )
+            for candidate, row in zip(candidates, rows, strict=True)
+        ]
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        return [
+            CandidateResult(
+                candidate=candidate,
+                mean_reward=None,
+                std_reward=None,
+                episode_rewards=[],
+                timesteps=config.timesteps,
+                seed=config.seed,
+                task=config.task,
+                status="failed",
+                error=error,
+                metadata={"sim_backend": config.sim_backend, "candidate_batching": True},
+            )
+            for candidate in candidates
+        ]
+
+
+def candidates_can_be_batched(
+    candidates: list[RewardCandidate],
+    config: CandidateEvaluationConfig,
+) -> bool:
+    return (
+        config.timesteps > 0
+        and len(candidates) > 1
+        and config.sim_backend == "mjwarp"
+        and config.mjwarp_evaluator == "ppo"
+        and config.mjwarp_rollout_mode == "gpu"
+        and config.mjwarp_batch_candidates
+    )
 
 
 def write_results(output_dir: Path, results: list[CandidateResult]) -> None:

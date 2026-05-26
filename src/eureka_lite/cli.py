@@ -71,6 +71,11 @@ def main() -> None:
         mjwarp_ppo_minibatch_size=args.mjwarp_ppo_minibatch_size,
         mjwarp_ppo_learning_rate=args.mjwarp_ppo_learning_rate,
         mjwarp_elite_frac=args.mjwarp_elite_frac,
+        mjwarp_rollout_mode=args.mjwarp_rollout_mode,
+        mjwarp_verified_evaluator=args.mjwarp_verified_evaluator,
+        mjwarp_verification_steps=args.mjwarp_verification_steps,
+        mjwarp_batch_candidates=not args.no_mjwarp_candidate_batching,
+        mjwarp_cuda_graph=not args.no_mjwarp_cuda_graph,
         include_negative_rlvr_samples=not args.no_negative_rlvr_samples,
         negative_rlvr_margin=args.negative_rlvr_margin,
     )

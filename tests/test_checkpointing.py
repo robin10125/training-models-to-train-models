@@ -7,10 +7,12 @@ from pathlib import Path
 
 from eureka_lite.generators import initial_population
 from eureka_lite.search import (
+    CandidateEvaluationConfig,
     CandidateResult,
     RunConfig,
     candidate_result_from_dict,
     candidate_result_to_dict,
+    candidates_can_be_batched,
     prepare_output_dir,
     assign_failed_evaluation_penalties,
     negative_reward_for_generation,
@@ -22,6 +24,20 @@ from eureka_lite.search import (
 
 
 class CheckpointingTests(unittest.TestCase):
+    def test_gpu_mjwarp_ppo_candidates_are_batched_by_default(self) -> None:
+        candidates = initial_population("Ant-v5", 2, __import__("random").Random(7))
+        config = CandidateEvaluationConfig(
+            task="Ant-v5",
+            timesteps=1,
+            eval_episodes=1,
+            n_envs=1,
+            seed=7,
+            device="cuda",
+            sim_backend="mjwarp",
+        )
+        self.assertTrue(candidates_can_be_batched(candidates, config))
+        self.assertFalse(candidates_can_be_batched(candidates, config.__class__(**{**config.__dict__, "mjwarp_batch_candidates": False})))
+
     def test_candidate_result_round_trips_through_dict(self) -> None:
         candidate = initial_population("Ant-v5", 1, __import__("random").Random(7))[0]
         result = CandidateResult(
@@ -172,6 +188,8 @@ class CheckpointingTests(unittest.TestCase):
             ]
 
         self.assertEqual(len(results), 6)
+        self.assertEqual({result.seed for result in results if result.candidate.generation == 0}, {7})
+        self.assertEqual({result.seed for result in results if result.candidate.generation == 1}, {107})
         self.assertTrue(any(record["eureka_parent_names"] for record in records))
         self.assertTrue(any(record["eureka_elite_names"] for record in records))
         self.assertTrue(any(record["eureka_feedback"] for record in records))
@@ -252,3 +270,4 @@ class CheckpointingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    candidates_can_be_batched,

@@ -1,5 +1,28 @@
 # GPU-Resident Ant PPO Optimization Plan
 
+## Implementation Status
+
+Implemented:
+
+- selectable GPU-resident PPO rollout (`--mjwarp-rollout-mode gpu`, default);
+- Torch CUDA generated-reward execution and GAE;
+- Torch/Warp shared-memory policy-to-simulator control transfer;
+- removal of per-step `numpy()` transfers and explicit synchronization from
+  the GPU PPO loop;
+- frame-skipped MJWarp control stepping matching Ant action cadence;
+- selectable batched MJWarp verified evaluation with fixed-seed Gym reset
+  initialization (`--mjwarp-verified-evaluator mjwarp`);
+- generation-level candidate-batched PPO evaluation with independent policy
+  parameters and `4096` worlds per candidate;
+- best-effort CUDA graph replay for repeated Ant physics substeps;
+- host rollout and Gym verification reference paths.
+
+Still to be completed through measurement rather than assumed:
+
+- full Gym-versus-MJWarp verified-return equivalence characterization;
+- target 96 GB GPU world-count scaling;
+- full target-GPU throughput measurement of the `16 * 4096` candidate batch.
+
 ## Purpose
 
 The intended experiment evaluates many code-model reward proposals by training

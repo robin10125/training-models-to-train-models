@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ast
+import builtins
+import math
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,7 +27,7 @@ class MjwarpEvaluatorConfig:
     evaluator: str = "ppo"
     worlds_per_candidate: int = 4096
     episode_steps: int = 500
-    policy_iterations: int = 4
+    policy_iterations: int = 96
     ppo_horizon: int = 32
     ppo_epochs: int = 4
     ppo_minibatch_size: int = 16_384
@@ -35,6 +38,10 @@ class MjwarpEvaluatorConfig:
     ppo_value_coef: float = 2.0
     ppo_entropy_coef: float = 0.0
     ppo_max_grad_norm: float = 1.0
+    rollout_mode: str = "gpu"
+    verified_evaluator: str = "gym"
+    verification_steps: int = 1000
+    use_cuda_graph: bool = True
     elite_frac: float = 0.1
     init_std: float = 0.35
     min_std: float = 0.03
@@ -54,6 +61,12 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
         raise ValueError("policy_iterations must be at least 1")
     if config.evaluator not in {"ppo", "search"}:
         raise ValueError("evaluator must be one of: ppo, search")
+    if config.rollout_mode not in {"gpu", "host"}:
+        raise ValueError("rollout_mode must be one of: gpu, host")
+    if config.verified_evaluator not in {"mjwarp", "gym"}:
+        raise ValueError("verified_evaluator must be one of: mjwarp, gym")
+    if config.verification_steps < 1:
+        raise ValueError("verification_steps must be at least 1")
     if config.ppo_horizon < 1:
         raise ValueError("ppo_horizon must be at least 1")
     if not 0.0 < config.elite_frac <= 1.0:
@@ -80,13 +93,16 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
     env = gym.make(config.task)
     try:
         mjm = env.unwrapped.model
-        dt = float(mjm.opt.timestep * env.unwrapped.frame_skip)
+        frame_skip = int(env.unwrapped.frame_skip)
+        dt = float(mjm.opt.timestep * frame_skip)
+        eval_episode_steps = config.verification_steps
         action_dim = int(mjm.nu)
         obs_dim = int(mjm.nq - 2 + mjm.nv)
         wp.init()
         with wp.ScopedDevice(config.device):
             model = mjw.put_model(mjm)
             data = mjw.make_data(mjm, nworld=config.worlds_per_candidate)
+            wp.synchronize()
             if config.evaluator == "ppo":
                 policy, best_shaped_return, iteration_summaries = train_ppo_policy(
                     model=model,
@@ -97,6 +113,7 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
                     reward_program=reward_program,
                     config=config,
                     dt=dt,
+                    frame_skip=frame_skip,
                     wp=wp,
                     mjw=mjw,
                 )
@@ -111,6 +128,7 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
                     reward_program=reward_program,
                     config=config,
                     dt=dt,
+                    frame_skip=frame_skip,
                     rng=rng,
                     wp=wp,
                     mjw=mjw,
@@ -119,14 +137,36 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
     finally:
         env.close()
 
-    eval_returns = evaluate_policy_in_gym(
-        task=config.task,
-        policy=eval_policy,
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        eval_episodes=config.eval_episodes,
-        seed=config.seed + 10_000,
-    )
+    if config.verified_evaluator == "mjwarp":
+        with wp.ScopedDevice(config.device):
+            eval_data = mjw.make_data(mjm, nworld=config.eval_episodes)
+            wp.synchronize()
+            eval_returns = evaluate_policy_in_mjwarp(
+                task=config.task,
+                model=model,
+                data=eval_data,
+                mjm=mjm,
+                policy=eval_policy,
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                eval_episodes=config.eval_episodes,
+                episode_steps=eval_episode_steps,
+                seed=config.seed + 10_000,
+                device=config.device,
+                dt=dt,
+                frame_skip=frame_skip,
+                wp=wp,
+                mjw=mjw,
+            )
+    else:
+        eval_returns = evaluate_policy_in_gym(
+            task=config.task,
+            policy=eval_policy,
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            eval_episodes=config.eval_episodes,
+            seed=config.seed + 10_000,
+        )
     return {
         "mean_reward": float(np.mean(eval_returns)),
         "std_reward": float(np.std(eval_returns)),
@@ -143,12 +183,152 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
             "ppo_epochs": config.ppo_epochs,
             "ppo_minibatch_size": config.ppo_minibatch_size,
             "ppo_hidden_sizes": [256, 128, 64],
+            "rollout_mode": config.rollout_mode,
+            "verified_evaluator": config.verified_evaluator,
+            "candidate_batching": False,
+            "cuda_graph_requested": config.use_cuda_graph,
+            "frame_skip": frame_skip,
+            "evaluation_episode_steps": eval_episode_steps,
             "elite_frac": config.elite_frac,
             "reward_components": reward_program.component_expressions,
             "best_shaped_return": best_shaped_return,
             "iteration_summaries": iteration_summaries,
         },
     }
+
+
+def train_and_evaluate_mjwarp_batch(
+    candidates: list[RewardCandidate], config: MjwarpEvaluatorConfig
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    if config.task != "Ant-v5":
+        raise ValueError("The MJWarp evaluator currently supports only Ant-v5")
+    if config.evaluator != "ppo" or config.rollout_mode != "gpu":
+        raise ValueError("Candidate batching requires the GPU PPO evaluator")
+    if config.worlds_per_candidate < 2 or config.episode_steps < 1 or config.policy_iterations < 1:
+        raise ValueError("Candidate batching requires valid worlds and policy training steps")
+    if config.verified_evaluator not in {"mjwarp", "gym"}:
+        raise ValueError("verified_evaluator must be one of: mjwarp, gym")
+
+    try:
+        import mujoco_warp as mjw
+        import warp as wp
+    except ImportError as exc:
+        raise RuntimeError(
+            "The MJWarp evaluator requires optional GPU dependencies. Install with "
+            "`pip install -e '.[mjwarp]'`."
+        ) from exc
+
+    started_at = time.monotonic()
+    adapter = get_adapter(config.task)
+    reward_programs = [
+        VectorizedRewardProgram(
+            component_expressions=candidate.component_expressions,
+            expression=candidate.expression,
+            allowed_names=adapter.reward_variables,
+        )
+        for candidate in candidates
+    ]
+    env = gym.make(config.task)
+    try:
+        mjm = env.unwrapped.model
+        frame_skip = int(env.unwrapped.frame_skip)
+        dt = float(mjm.opt.timestep * frame_skip)
+        action_dim = int(mjm.nu)
+        obs_dim = int(mjm.nq - 2 + mjm.nv)
+        total_worlds = len(candidates) * config.worlds_per_candidate
+        wp.init()
+        with wp.ScopedDevice(config.device):
+            model = mjw.put_model(mjm)
+            data = mjw.make_data(mjm, nworld=total_worlds)
+            wp.synchronize()
+            policy, best_returns, summaries, graph_enabled = train_ppo_policy_gpu_batch(
+                model=model,
+                data=data,
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                reward_programs=reward_programs,
+                config=config,
+                dt=dt,
+                frame_skip=frame_skip,
+                wp=wp,
+                mjw=mjw,
+            )
+    finally:
+        env.close()
+
+    eval_returns_by_candidate: list[list[float]] = []
+    for candidate_index in range(len(candidates)):
+        eval_policy = ("batched_ppo", (policy, candidate_index))
+        if config.verified_evaluator == "mjwarp":
+            with wp.ScopedDevice(config.device):
+                eval_data = mjw.make_data(mjm, nworld=config.eval_episodes)
+                wp.synchronize()
+                eval_returns = evaluate_policy_in_mjwarp(
+                    task=config.task,
+                    model=model,
+                    data=eval_data,
+                    mjm=mjm,
+                    policy=eval_policy,
+                    obs_dim=obs_dim,
+                    action_dim=action_dim,
+                    eval_episodes=config.eval_episodes,
+                    episode_steps=config.verification_steps,
+                    seed=config.seed + 10_000,
+                    device=config.device,
+                    dt=dt,
+                    frame_skip=frame_skip,
+                    wp=wp,
+                    mjw=mjw,
+                )
+        else:
+            eval_returns = evaluate_policy_in_gym(
+                task=config.task,
+                policy=eval_policy,
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                eval_episodes=config.eval_episodes,
+                seed=config.seed + 10_000,
+            )
+        eval_returns_by_candidate.append(eval_returns)
+
+    elapsed_seconds = time.monotonic() - started_at
+    return [
+        {
+            "mean_reward": float(np.mean(eval_returns)),
+            "std_reward": float(np.std(eval_returns)),
+            "episode_rewards": eval_returns,
+            "elapsed_seconds": elapsed_seconds,
+            "metadata": {
+                "sim_backend": "mjwarp",
+                "mjwarp_evaluator": config.evaluator,
+                "worlds_per_candidate": config.worlds_per_candidate,
+                "total_batched_worlds": len(candidates) * config.worlds_per_candidate,
+                "candidate_batching": True,
+                "candidate_batch_size": len(candidates),
+                "episode_steps": config.episode_steps,
+                "policy_iterations": config.policy_iterations,
+                "training_world_steps": config.worlds_per_candidate
+                * config.episode_steps
+                * config.policy_iterations,
+                "ppo_horizon": config.ppo_horizon,
+                "ppo_epochs": config.ppo_epochs,
+                "ppo_minibatch_size": config.ppo_minibatch_size,
+                "ppo_hidden_sizes": [256, 128, 64],
+                "rollout_mode": config.rollout_mode,
+                "verified_evaluator": config.verified_evaluator,
+                "cuda_graph_requested": config.use_cuda_graph,
+                "cuda_graph_enabled": graph_enabled,
+                "frame_skip": frame_skip,
+                "evaluation_episode_steps": config.verification_steps,
+                "reward_components": reward_programs[index].component_expressions,
+                "best_shaped_return": best_returns[index],
+                "iteration_summaries": summaries[index],
+            },
+        }
+        for index, eval_returns in enumerate(eval_returns_by_candidate)
+    ]
 
 
 def rollout_policy_population(
@@ -160,6 +340,7 @@ def rollout_policy_population(
     reward_program: "VectorizedRewardProgram",
     episode_steps: int,
     dt: float,
+    frame_skip: int,
     device: str,
     wp: Any,
     mjw: Any,
@@ -182,7 +363,7 @@ def rollout_policy_population(
         obs = ant_policy_obs(qpos_before, qvel_before)
         action = np.tanh(np.einsum("wo,woa->wa", obs, weights) + biases).astype(np.float32)
         wp.copy(data.ctrl, wp.array(action, dtype=wp.float32, device=device))
-        mjw.step(model, data)
+        mjwarp_control_step(model, data, mjw=mjw, frame_skip=frame_skip)
         wp.synchronize()
 
         qpos_after = np.asarray(data.qpos.numpy(), dtype=np.float32)
@@ -234,6 +415,7 @@ def train_search_policy(
     reward_program: "VectorizedRewardProgram",
     config: MjwarpEvaluatorConfig,
     dt: float,
+    frame_skip: int,
     rng: np.random.Generator,
     wp: Any,
     mjw: Any,
@@ -254,6 +436,7 @@ def train_search_policy(
             reward_program=reward_program,
             episode_steps=config.episode_steps,
             dt=dt,
+            frame_skip=frame_skip,
             device=config.device,
             wp=wp,
             mjw=mjw,
@@ -289,6 +472,56 @@ def train_ppo_policy(
     reward_program: "VectorizedRewardProgram",
     config: MjwarpEvaluatorConfig,
     dt: float,
+    frame_skip: int,
+    wp: Any,
+    mjw: Any,
+) -> tuple[Any, float, list[dict[str, float]]]:
+    seed_torch_policy_rng(config.seed)
+    if config.rollout_mode == "gpu":
+        return train_ppo_policy_gpu(
+            model=model,
+            data=data,
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            reward_program=reward_program,
+            config=config,
+            dt=dt,
+            frame_skip=frame_skip,
+            wp=wp,
+            mjw=mjw,
+        )
+    return train_ppo_policy_host(
+        model=model,
+        data=data,
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        reward_program=reward_program,
+        config=config,
+        dt=dt,
+        frame_skip=frame_skip,
+        wp=wp,
+        mjw=mjw,
+    )
+
+
+def seed_torch_policy_rng(seed: int) -> None:
+    import torch
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def train_ppo_policy_host(
+    *,
+    model: Any,
+    data: Any,
+    obs_dim: int,
+    action_dim: int,
+    reward_program: "VectorizedRewardProgram",
+    config: MjwarpEvaluatorConfig,
+    dt: float,
+    frame_skip: int,
     wp: Any,
     mjw: Any,
 ) -> tuple[Any, float, list[dict[str, float]]]:
@@ -327,7 +560,7 @@ def train_ppo_policy(
                     action_t, logprob_t, _, value_t = policy.act(obs)
                 action = action_t.detach().cpu().numpy().astype(np.float32)
                 wp.copy(data.ctrl, wp.array(action, dtype=wp.float32, device=config.device))
-                mjw.step(model, data)
+                mjwarp_control_step(model, data, mjw=mjw, frame_skip=frame_skip)
                 wp.synchronize()
 
                 qpos_after = np.asarray(data.qpos.numpy(), dtype=np.float32)
@@ -414,6 +647,332 @@ def train_ppo_policy(
     return policy, best_shaped_return, iteration_summaries
 
 
+def train_ppo_policy_gpu(
+    *,
+    model: Any,
+    data: Any,
+    obs_dim: int,
+    action_dim: int,
+    reward_program: "VectorizedRewardProgram",
+    config: MjwarpEvaluatorConfig,
+    dt: float,
+    frame_skip: int,
+    wp: Any,
+    mjw: Any,
+) -> tuple[Any, float, list[dict[str, float]]]:
+    import torch
+
+    torch_device = torch.device("cuda" if config.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
+    policy = AntActorCritic(obs_dim, action_dim).to(torch_device)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.ppo_learning_rate)
+    torch_reward_program = TorchRewardProgram(
+        component_expressions=reward_program.component_expressions,
+        expression=reward_program.expression,
+        allowed_names=get_adapter(config.task).reward_variables,
+    )
+    iteration_summaries: list[dict[str, float]] = []
+    best_shaped_return = float("-inf")
+
+    with torch_warp_stream(wp, torch, torch_device):
+        mjw.reset_data(model, data)
+        qpos = wp.to_torch(data.qpos)
+        qvel = wp.to_torch(data.qvel)
+        ctrl = wp.to_torch(data.ctrl)
+        physics_graph = create_control_step_graph(
+            model=model,
+            data=data,
+            mjw=mjw,
+            wp=wp,
+            frame_skip=frame_skip,
+            enabled=config.use_cuda_graph,
+            device=config.device,
+        )
+        dones = torch.zeros(config.worlds_per_candidate, dtype=torch.bool, device=torch_device)
+        episode_shaped = torch.zeros(config.worlds_per_candidate, dtype=torch.float32, device=torch_device)
+        episode_true = torch.zeros(config.worlds_per_candidate, dtype=torch.float32, device=torch_device)
+        component_tracker = TorchRewardComponentTracker(torch_reward_program.component_names, torch_device)
+
+        chunks_per_iteration = max(1, int(np.ceil(config.episode_steps / config.ppo_horizon)))
+        update_index = 0
+        for iteration in range(config.policy_iterations):
+            for chunk in range(chunks_per_iteration):
+                rollout_steps = min(config.ppo_horizon, config.episode_steps - chunk * config.ppo_horizon)
+                batch_obs = torch.empty(
+                    (rollout_steps, config.worlds_per_candidate, obs_dim), dtype=torch.float32, device=torch_device
+                )
+                batch_actions = torch.empty(
+                    (rollout_steps, config.worlds_per_candidate, action_dim), dtype=torch.float32, device=torch_device
+                )
+                batch_logprobs = torch.empty(
+                    (rollout_steps, config.worlds_per_candidate), dtype=torch.float32, device=torch_device
+                )
+                batch_values = torch.empty_like(batch_logprobs)
+                batch_rewards = torch.empty_like(batch_logprobs)
+                batch_dones = torch.empty_like(batch_logprobs)
+
+                for step in range(rollout_steps):
+                    obs = ant_policy_obs_torch(qpos, qvel)
+                    qpos_xy_before = qpos[:, :2].clone()
+                    with torch.no_grad():
+                        action, logprob, _, value = policy.act(obs)
+                    ctrl.copy_(action)
+                    advance_control_step(
+                        model=model,
+                        data=data,
+                        mjw=mjw,
+                        wp=wp,
+                        frame_skip=frame_skip,
+                        graph=physics_graph,
+                    )
+                    shaped_reward, true_reward, next_dones, component_values = ant_rewards_torch(
+                        qpos_xy_before=qpos_xy_before,
+                        qpos_after=qpos,
+                        qvel_after=qvel,
+                        action=action,
+                        reward_program=torch_reward_program,
+                        dt=dt,
+                    )
+                    component_tracker.update(component_values)
+                    active = ~dones
+                    shaped_reward = torch.where(active, shaped_reward, torch.zeros_like(shaped_reward))
+                    true_reward = torch.where(active, true_reward, torch.zeros_like(true_reward))
+                    episode_shaped.add_(shaped_reward)
+                    episode_true.add_(true_reward)
+                    dones.logical_or_(next_dones)
+
+                    batch_obs[step].copy_(obs)
+                    batch_actions[step].copy_(action)
+                    batch_logprobs[step].copy_(logprob)
+                    batch_values[step].copy_(value)
+                    batch_rewards[step].copy_(shaped_reward)
+                    batch_dones[step].copy_(dones)
+
+                with torch.no_grad():
+                    next_value = policy.value(ant_policy_obs_torch(qpos, qvel))
+                advantages, returns = compute_gae_torch(
+                    rewards=batch_rewards,
+                    values=batch_values,
+                    dones=batch_dones,
+                    next_value=next_value,
+                    gamma=config.ppo_gamma,
+                    gae_lambda=config.ppo_gae_lambda,
+                )
+                flat_obs = batch_obs.reshape(-1, obs_dim)
+                flat_actions = batch_actions.reshape(-1, action_dim)
+                flat_old_logprobs = batch_logprobs.reshape(-1)
+                flat_advantages = advantages.reshape(-1)
+                flat_returns = returns.reshape(-1)
+                flat_advantages = (flat_advantages - flat_advantages.mean()) / flat_advantages.std().clamp_min(1e-6)
+
+                ppo_update(
+                    policy=policy,
+                    optimizer=optimizer,
+                    obs=flat_obs,
+                    actions=flat_actions,
+                    old_logprobs=flat_old_logprobs,
+                    advantages=flat_advantages,
+                    returns=flat_returns,
+                    config=config,
+                )
+                mean_shaped = float(episode_shaped.mean().item())
+                max_shaped = float(episode_shaped.max().item())
+                best_shaped_return = max(best_shaped_return, max_shaped)
+                iteration_summaries.append(
+                    {
+                        "iteration": iteration,
+                        "ppo_update": update_index,
+                        "mean_shaped_return": mean_shaped,
+                        "best_shaped_return": max_shaped,
+                        "mean_true_return_in_population": float(episode_true.mean().item()),
+                        "reward_component_stats": component_tracker.summary(),
+                    }
+                )
+                update_index += 1
+                if bool(dones.all().item()):
+                    episode_shaped.zero_()
+                    episode_true.zero_()
+                    dones.zero_()
+                    mjw.reset_data(model, data)
+
+    policy.eval()
+    return policy, best_shaped_return, iteration_summaries
+
+
+def train_ppo_policy_gpu_batch(
+    *,
+    model: Any,
+    data: Any,
+    obs_dim: int,
+    action_dim: int,
+    reward_programs: list["VectorizedRewardProgram"],
+    config: MjwarpEvaluatorConfig,
+    dt: float,
+    frame_skip: int,
+    wp: Any,
+    mjw: Any,
+) -> tuple[Any, list[float], list[list[dict[str, Any]]], bool]:
+    import torch
+
+    candidate_count = len(reward_programs)
+    worlds = config.worlds_per_candidate
+    torch_device = torch.device("cuda" if config.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
+    seed_torch_policy_rng(config.seed)
+    policy = BatchedAntActorCritic(candidate_count, obs_dim, action_dim).to(torch_device)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.ppo_learning_rate)
+    allowed_names = get_adapter(config.task).reward_variables
+    torch_programs = [
+        TorchRewardProgram(
+            component_expressions=program.component_expressions,
+            expression=program.expression,
+            allowed_names=allowed_names,
+        )
+        for program in reward_programs
+    ]
+    summaries: list[list[dict[str, Any]]] = [[] for _candidate in reward_programs]
+    best_returns = [float("-inf") for _candidate in reward_programs]
+
+    with torch_warp_stream(wp, torch, torch_device):
+        mjw.reset_data(model, data)
+        qpos = wp.to_torch(data.qpos).reshape(candidate_count, worlds, -1)
+        qvel = wp.to_torch(data.qvel).reshape(candidate_count, worlds, -1)
+        ctrl = wp.to_torch(data.ctrl).reshape(candidate_count, worlds, action_dim)
+        physics_graph = create_control_step_graph(
+            model=model,
+            data=data,
+            mjw=mjw,
+            wp=wp,
+            frame_skip=frame_skip,
+            enabled=config.use_cuda_graph,
+            device=config.device,
+        )
+        dones = torch.zeros((candidate_count, worlds), dtype=torch.bool, device=torch_device)
+        episode_shaped = torch.zeros((candidate_count, worlds), dtype=torch.float32, device=torch_device)
+        episode_true = torch.zeros_like(episode_shaped)
+        component_trackers = [
+            TorchRewardComponentTracker(program.component_names, torch_device) for program in torch_programs
+        ]
+
+        chunks_per_iteration = max(1, int(np.ceil(config.episode_steps / config.ppo_horizon)))
+        update_index = 0
+        for iteration in range(config.policy_iterations):
+            for chunk in range(chunks_per_iteration):
+                rollout_steps = min(config.ppo_horizon, config.episode_steps - chunk * config.ppo_horizon)
+                batch_obs = torch.empty(
+                    (rollout_steps, candidate_count, worlds, obs_dim), dtype=torch.float32, device=torch_device
+                )
+                batch_actions = torch.empty(
+                    (rollout_steps, candidate_count, worlds, action_dim), dtype=torch.float32, device=torch_device
+                )
+                batch_logprobs = torch.empty(
+                    (rollout_steps, candidate_count, worlds), dtype=torch.float32, device=torch_device
+                )
+                batch_values = torch.empty_like(batch_logprobs)
+                batch_rewards = torch.empty_like(batch_logprobs)
+                batch_dones = torch.empty_like(batch_logprobs)
+
+                for step in range(rollout_steps):
+                    obs = ant_policy_obs_torch_batched(qpos, qvel)
+                    qpos_xy_before = qpos[:, :, :2].clone()
+                    shared_noise = torch.randn((1, worlds, action_dim), dtype=torch.float32, device=torch_device)
+                    shared_noise = shared_noise.expand(candidate_count, -1, -1)
+                    with torch.no_grad():
+                        action, logprob, _, value = policy.act(obs, shared_noise)
+                    ctrl.copy_(action)
+                    advance_control_step(
+                        model=model,
+                        data=data,
+                        mjw=mjw,
+                        wp=wp,
+                        frame_skip=frame_skip,
+                        graph=physics_graph,
+                    )
+                    shaped_parts = []
+                    true_parts = []
+                    done_parts = []
+                    for index, reward_program in enumerate(torch_programs):
+                        shaped, true, next_dones, components = ant_rewards_torch(
+                            qpos_xy_before=qpos_xy_before[index],
+                            qpos_after=qpos[index],
+                            qvel_after=qvel[index],
+                            action=action[index],
+                            reward_program=reward_program,
+                            dt=dt,
+                        )
+                        component_trackers[index].update(components)
+                        shaped_parts.append(shaped)
+                        true_parts.append(true)
+                        done_parts.append(next_dones)
+                    shaped_reward = torch.stack(shaped_parts)
+                    true_reward = torch.stack(true_parts)
+                    next_dones = torch.stack(done_parts)
+                    active = ~dones
+                    shaped_reward = torch.where(active, shaped_reward, torch.zeros_like(shaped_reward))
+                    true_reward = torch.where(active, true_reward, torch.zeros_like(true_reward))
+                    episode_shaped.add_(shaped_reward)
+                    episode_true.add_(true_reward)
+                    dones.logical_or_(next_dones)
+                    batch_obs[step].copy_(obs)
+                    batch_actions[step].copy_(action)
+                    batch_logprobs[step].copy_(logprob)
+                    batch_values[step].copy_(value)
+                    batch_rewards[step].copy_(shaped_reward)
+                    batch_dones[step].copy_(dones)
+
+                with torch.no_grad():
+                    next_value = policy.value(ant_policy_obs_torch_batched(qpos, qvel))
+                advantages, returns = compute_gae_torch(
+                    rewards=batch_rewards,
+                    values=batch_values,
+                    dones=batch_dones,
+                    next_value=next_value,
+                    gamma=config.ppo_gamma,
+                    gae_lambda=config.ppo_gae_lambda,
+                )
+                flat_obs = batch_obs.permute(1, 0, 2, 3).reshape(candidate_count, -1, obs_dim)
+                flat_actions = batch_actions.permute(1, 0, 2, 3).reshape(candidate_count, -1, action_dim)
+                flat_logprobs = batch_logprobs.permute(1, 0, 2).reshape(candidate_count, -1)
+                flat_advantages = advantages.permute(1, 0, 2).reshape(candidate_count, -1)
+                flat_returns = returns.permute(1, 0, 2).reshape(candidate_count, -1)
+                means = flat_advantages.mean(dim=1, keepdim=True)
+                stds = flat_advantages.std(dim=1, keepdim=True).clamp_min(1e-6)
+                flat_advantages = (flat_advantages - means) / stds
+                ppo_update_batched(
+                    policy=policy,
+                    optimizer=optimizer,
+                    obs=flat_obs,
+                    actions=flat_actions,
+                    old_logprobs=flat_logprobs,
+                    advantages=flat_advantages,
+                    returns=flat_returns,
+                    config=config,
+                )
+                mean_shaped = episode_shaped.mean(dim=1)
+                max_shaped = episode_shaped.max(dim=1).values
+                mean_true = episode_true.mean(dim=1)
+                for index in range(candidate_count):
+                    current_best = float(max_shaped[index].item())
+                    best_returns[index] = max(best_returns[index], current_best)
+                    summaries[index].append(
+                        {
+                            "iteration": iteration,
+                            "ppo_update": update_index,
+                            "mean_shaped_return": float(mean_shaped[index].item()),
+                            "best_shaped_return": current_best,
+                            "mean_true_return_in_population": float(mean_true[index].item()),
+                            "reward_component_stats": component_trackers[index].summary(),
+                        }
+                    )
+                update_index += 1
+                if bool(dones.all().item()):
+                    episode_shaped.zero_()
+                    episode_true.zero_()
+                    dones.zero_()
+                    mjw.reset_data(model, data)
+
+    policy.eval()
+    return policy, best_returns, summaries, physics_graph is not None
+
+
 def ant_rewards(
     *,
     qpos_before: np.ndarray,
@@ -451,6 +1010,45 @@ def ant_rewards(
     return shaped_reward.astype(np.float32), original_reward.astype(np.float32), (~healthy), component_values
 
 
+def ant_rewards_torch(
+    *,
+    qpos_xy_before: Any,
+    qpos_after: Any,
+    qvel_after: Any,
+    action: Any,
+    reward_program: "TorchRewardProgram",
+    dt: float,
+) -> tuple[Any, Any, Any, dict[str, Any]]:
+    import torch
+
+    x_velocity = (qpos_after[:, 0] - qpos_xy_before[:, 0]) / dt
+    y_velocity = (qpos_after[:, 1] - qpos_xy_before[:, 1]) / dt
+    torso_z = qpos_after[:, 2]
+    healthy = torch.isfinite(qpos_after).all(dim=1) & torch.isfinite(qvel_after).all(dim=1)
+    healthy &= (torso_z >= 0.2) & (torso_z <= 1.0)
+    action_l2 = action.square().sum(dim=1)
+    forward_reward = x_velocity
+    control_cost = 0.5 * 1.0e-2 * action_l2
+    survive_reward = healthy.to(dtype=torch.float32)
+    original_reward = forward_reward + survive_reward - control_cost
+    context = {
+        "x_velocity": x_velocity,
+        "y_velocity": y_velocity,
+        "forward_reward": forward_reward,
+        "control_cost": control_cost,
+        "survive_reward": survive_reward,
+        "torso_z": torso_z,
+        "action_l2": action_l2,
+        "original_reward": original_reward,
+        "healthy": healthy,
+        "terminated": ~healthy,
+        "truncated": torch.zeros_like(healthy),
+    }
+    component_values = reward_program.components(context)
+    shaped_reward = reward_program.total_from_components(component_values)
+    return shaped_reward, original_reward.to(dtype=torch.float32), ~healthy, component_values
+
+
 def compute_gae(
     *,
     rewards: np.ndarray,
@@ -470,6 +1068,28 @@ def compute_gae(
         advantages[step] = last_gae
     returns = advantages + values
     return advantages, returns
+
+
+def compute_gae_torch(
+    *,
+    rewards: Any,
+    values: Any,
+    dones: Any,
+    next_value: Any,
+    gamma: float,
+    gae_lambda: float,
+) -> tuple[Any, Any]:
+    import torch
+
+    advantages = torch.zeros_like(rewards)
+    last_gae = torch.zeros_like(next_value)
+    for step in reversed(range(rewards.shape[0])):
+        next_nonterminal = 1.0 - dones[step].to(dtype=rewards.dtype)
+        next_values = next_value if step == rewards.shape[0] - 1 else values[step + 1]
+        delta = rewards[step] + gamma * next_values * next_nonterminal - values[step]
+        last_gae = delta + gamma * gae_lambda * next_nonterminal * last_gae
+        advantages[step] = last_gae
+    return advantages, advantages + values
 
 
 def ppo_update(
@@ -506,8 +1126,195 @@ def ppo_update(
             optimizer.step()
 
 
+def ppo_update_batched(
+    *,
+    policy: Any,
+    optimizer: Any,
+    obs: Any,
+    actions: Any,
+    old_logprobs: Any,
+    advantages: Any,
+    returns: Any,
+    config: MjwarpEvaluatorConfig,
+) -> None:
+    import torch
+
+    batch_size = obs.shape[1]
+    minibatch_size = min(config.ppo_minibatch_size, batch_size)
+    for _epoch in range(config.ppo_epochs):
+        permutation = torch.randperm(batch_size, device=obs.device)
+        for start in range(0, batch_size, minibatch_size):
+            idx = permutation[start : start + minibatch_size]
+            new_logprob, entropy, value = policy.evaluate_actions(obs[:, idx], actions[:, idx])
+            ratio = (new_logprob - old_logprobs[:, idx]).exp()
+            unclipped = ratio * advantages[:, idx]
+            clipped = torch.clamp(ratio, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip) * advantages[:, idx]
+            policy_loss = -torch.min(unclipped, clipped).mean(dim=1)
+            value_loss = 0.5 * (returns[:, idx] - value).square().mean(dim=1)
+            entropy_loss = entropy.mean(dim=1)
+            loss = (policy_loss + config.ppo_value_coef * value_loss - config.ppo_entropy_coef * entropy_loss).sum()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), config.ppo_max_grad_norm)
+            optimizer.step()
+
+
 def ant_policy_obs(qpos: np.ndarray, qvel: np.ndarray) -> np.ndarray:
     return np.concatenate([qpos[:, 2:], qvel], axis=1).astype(np.float32)
+
+
+def ant_policy_obs_torch(qpos: Any, qvel: Any) -> Any:
+    import torch
+
+    return torch.cat((qpos[:, 2:], qvel), dim=1)
+
+
+def ant_policy_obs_torch_batched(qpos: Any, qvel: Any) -> Any:
+    import torch
+
+    return torch.cat((qpos[:, :, 2:], qvel), dim=2)
+
+
+def mjwarp_control_step(model: Any, data: Any, *, mjw: Any, frame_skip: int) -> None:
+    for _frame in range(frame_skip):
+        mjw.step(model, data)
+
+
+def create_control_step_graph(
+    *,
+    model: Any,
+    data: Any,
+    mjw: Any,
+    wp: Any,
+    frame_skip: int,
+    enabled: bool,
+    device: str,
+) -> Any | None:
+    if not enabled or not device.startswith("cuda"):
+        return None
+    try:
+        mjwarp_control_step(model, data, mjw=mjw, frame_skip=frame_skip)
+        mjw.reset_data(model, data)
+        wp.synchronize()
+        with wp.ScopedCapture(device=device) as capture:
+            mjwarp_control_step(model, data, mjw=mjw, frame_skip=frame_skip)
+        mjw.reset_data(model, data)
+        wp.synchronize()
+        return capture.graph
+    except Exception:
+        mjw.reset_data(model, data)
+        wp.synchronize()
+        return None
+
+
+def advance_control_step(
+    *,
+    model: Any,
+    data: Any,
+    mjw: Any,
+    wp: Any,
+    frame_skip: int,
+    graph: Any | None,
+) -> None:
+    if graph is None:
+        mjwarp_control_step(model, data, mjw=mjw, frame_skip=frame_skip)
+    else:
+        wp.capture_launch(graph)
+
+
+def torch_warp_stream(wp: Any, torch: Any, device: Any) -> Any:
+    if device.type != "cuda":
+        return nullcontext()
+    warp_device = f"cuda:{0 if device.index is None else device.index}"
+    stream = torch.cuda.ExternalStream(wp.get_stream(warp_device).cuda_stream, device=device)
+    return torch.cuda.stream(stream)
+
+
+def evaluate_policy_in_mjwarp(
+    *,
+    task: str,
+    model: Any,
+    data: Any,
+    mjm: Any,
+    policy: tuple[str, Any],
+    obs_dim: int,
+    action_dim: int,
+    eval_episodes: int,
+    episode_steps: int,
+    seed: int,
+    device: str,
+    dt: float,
+    frame_skip: int,
+    wp: Any,
+    mjw: Any,
+) -> list[float]:
+    import torch
+
+    del mjm
+    torch_device = torch.device("cuda" if device.startswith("cuda") and torch.cuda.is_available() else "cpu")
+    qpos_initial, qvel_initial = ant_reset_states(task, eval_episodes, seed)
+    policy_type, policy_data = policy
+    if policy_type == "linear":
+        weights = torch.as_tensor(
+            policy_data[: obs_dim * action_dim], dtype=torch.float32, device=torch_device
+        ).reshape(obs_dim, action_dim)
+        biases = torch.as_tensor(policy_data[weights.numel() :], dtype=torch.float32, device=torch_device)
+    elif policy_type == "batched_ppo":
+        torch_policy, candidate_index = policy_data
+    else:
+        torch_policy = policy_data
+
+    with torch_warp_stream(wp, torch, torch_device):
+        mjw.reset_data(model, data)
+        qpos = wp.to_torch(data.qpos)
+        qvel = wp.to_torch(data.qvel)
+        ctrl = wp.to_torch(data.ctrl)
+        qpos.copy_(torch.as_tensor(qpos_initial, dtype=torch.float32, device=torch_device))
+        qvel.copy_(torch.as_tensor(qvel_initial, dtype=torch.float32, device=torch_device))
+        returns = torch.zeros(eval_episodes, dtype=torch.float32, device=torch_device)
+        dones = torch.zeros(eval_episodes, dtype=torch.bool, device=torch_device)
+        for _step in range(episode_steps):
+            obs = ant_policy_obs_torch(qpos, qvel)
+            qpos_xy_before = qpos[:, :2].clone()
+            with torch.no_grad():
+                if policy_type == "linear":
+                    action = torch.tanh(obs @ weights + biases)
+                elif policy_type == "batched_ppo":
+                    action = torch_policy.mean_action_for_candidate(obs, candidate_index)
+                else:
+                    action = torch_policy.mean_action(obs)
+            ctrl.copy_(action)
+            mjwarp_control_step(model, data, mjw=mjw, frame_skip=frame_skip)
+            true_reward, next_dones = original_ant_reward_torch(qpos_xy_before, qpos, qvel, action, dt)
+            returns.add_(torch.where(~dones, true_reward, torch.zeros_like(true_reward)))
+            dones.logical_or_(next_dones)
+        return returns.detach().cpu().tolist()
+
+
+def ant_reset_states(task: str, episodes: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    env = gym.make(task)
+    qpos = []
+    qvel = []
+    try:
+        for episode in range(episodes):
+            env.reset(seed=seed + episode)
+            qpos.append(np.asarray(env.unwrapped.data.qpos, dtype=np.float32).copy())
+            qvel.append(np.asarray(env.unwrapped.data.qvel, dtype=np.float32).copy())
+    finally:
+        env.close()
+    return np.asarray(qpos, dtype=np.float32), np.asarray(qvel, dtype=np.float32)
+
+
+def original_ant_reward_torch(qpos_xy_before: Any, qpos_after: Any, qvel_after: Any, action: Any, dt: float) -> tuple[Any, Any]:
+    import torch
+
+    x_velocity = (qpos_after[:, 0] - qpos_xy_before[:, 0]) / dt
+    torso_z = qpos_after[:, 2]
+    healthy = torch.isfinite(qpos_after).all(dim=1) & torch.isfinite(qvel_after).all(dim=1)
+    healthy &= (torso_z >= 0.2) & (torso_z <= 1.0)
+    control_cost = 0.5 * 1.0e-2 * action.square().sum(dim=1)
+    original_reward = x_velocity + healthy.to(dtype=torch.float32) - control_cost
+    return original_reward.to(dtype=torch.float32), ~healthy
 
 
 def evaluate_policy_in_gym(
@@ -523,6 +1330,11 @@ def evaluate_policy_in_gym(
     if policy_type == "linear":
         weights = policy_data[: obs_dim * action_dim].reshape(obs_dim, action_dim)
         biases = policy_data[obs_dim * action_dim :]
+    elif policy_type == "batched_ppo":
+        import torch
+
+        torch_policy, candidate_index = policy_data
+        torch_device = next(torch_policy.parameters()).device
     else:
         import torch
 
@@ -543,7 +1355,11 @@ def evaluate_policy_in_gym(
                 else:
                     obs_t = torch.as_tensor(policy_obs[None, :], dtype=torch.float32, device=torch_device)
                     with torch.no_grad():
-                        action = torch_policy.mean_action(obs_t).cpu().numpy()[0].astype(np.float32)
+                        if policy_type == "batched_ppo":
+                            action_t = torch_policy.mean_action_for_candidate(obs_t, candidate_index)
+                        else:
+                            action_t = torch_policy.mean_action(obs_t)
+                        action = action_t.cpu().numpy()[0].astype(np.float32)
                 obs, reward, terminated, truncated, _info = env.step(action)
                 total_reward += float(reward)
         finally:
@@ -606,6 +1422,81 @@ class AntActorCritic:
                 return torch.tanh(mean)
 
         return _AntActorCritic()
+
+
+class BatchedAntActorCritic:
+    def __new__(cls, candidate_count: int, obs_dim: int, action_dim: int):
+        import torch
+        import torch.nn.functional as functional
+
+        class _BatchedAntActorCritic(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                base = AntActorCritic(obs_dim, action_dim)
+                linear_layers = [base.backbone[0], base.backbone[2], base.backbone[4], base.actor_mean, base.critic]
+                for index, layer in enumerate(linear_layers):
+                    setattr(
+                        self,
+                        f"weight_{index}",
+                        torch.nn.Parameter(layer.weight.detach().unsqueeze(0).repeat(candidate_count, 1, 1)),
+                    )
+                    setattr(
+                        self,
+                        f"bias_{index}",
+                        torch.nn.Parameter(layer.bias.detach().unsqueeze(0).repeat(candidate_count, 1)),
+                    )
+                self.log_std = torch.nn.Parameter(base.log_std.detach().unsqueeze(0).repeat(candidate_count, 1))
+
+            def linear(self, values: Any, index: int) -> Any:
+                weights = getattr(self, f"weight_{index}")
+                biases = getattr(self, f"bias_{index}")
+                return torch.einsum("cni,coi->cno", values, weights) + biases[:, None, :]
+
+            def forward(self, obs: Any) -> tuple[Any, Any]:
+                features = functional.elu(self.linear(obs, 0))
+                features = functional.elu(self.linear(features, 1))
+                features = functional.elu(self.linear(features, 2))
+                return self.linear(features, 3), self.linear(features, 4).squeeze(-1)
+
+            def act(self, obs: Any, noise: Any) -> tuple[Any, Any, Any, Any]:
+                mean, value = self.forward(obs)
+                std = self.log_std.exp()[:, None, :]
+                raw_action = mean + std * noise
+                action = torch.tanh(raw_action)
+                logprob = (
+                    -0.5 * ((raw_action - mean) / std).square()
+                    - self.log_std[:, None, :]
+                    - 0.5 * math.log(2.0 * math.pi)
+                ).sum(dim=-1)
+                entropy = (
+                    self.log_std[:, None, :] + 0.5 * (1.0 + math.log(2.0 * math.pi))
+                ).expand_as(raw_action).sum(dim=-1)
+                return action, logprob, entropy, value
+
+            def evaluate_actions(self, obs: Any, action: Any) -> tuple[Any, Any, Any]:
+                mean, value = self.forward(obs)
+                std = self.log_std.exp()[:, None, :]
+                raw_action = torch.atanh(action.clamp(-0.999, 0.999))
+                logprob = (
+                    -0.5 * ((raw_action - mean) / std).square()
+                    - self.log_std[:, None, :]
+                    - 0.5 * math.log(2.0 * math.pi)
+                ).sum(dim=-1)
+                entropy = (
+                    self.log_std[:, None, :] + 0.5 * (1.0 + math.log(2.0 * math.pi))
+                ).expand_as(raw_action).sum(dim=-1)
+                return logprob, entropy, value
+
+            def value(self, obs: Any) -> Any:
+                _mean, value = self.forward(obs)
+                return value
+
+            def mean_action_for_candidate(self, obs: Any, candidate_index: int) -> Any:
+                repeated_obs = obs.unsqueeze(0).expand(candidate_count, -1, -1)
+                mean, _value = self.forward(repeated_obs)
+                return torch.tanh(mean[candidate_index])
+
+        return _BatchedAntActorCritic()
 
 
 class VectorizedRewardExpression:
@@ -704,7 +1595,119 @@ class RewardComponentTracker:
         return summary
 
 
+class TorchRewardExpression:
+    def __init__(self, expression: str, allowed_names: set[str] | frozenset[str]) -> None:
+        RewardExpression(expression, allowed_names)
+        parsed = ast.parse(expression, mode="eval")
+        parsed = TorchWhereTransformer().visit(parsed)
+        ast.fix_missing_locations(parsed)
+        self._code = compile(parsed, "<torch-reward-expression>", "eval")
+
+    def __call__(self, values: dict[str, Any]) -> Any:
+        import torch
+
+        result = eval(self._code, {"__builtins__": {}, **torch_functions()}, {**values, "pi": math.pi})
+        template = next(iter(values.values()))
+        if not torch.is_tensor(result):
+            result = torch.full_like(template, float(result), dtype=torch.float32)
+        result = result.to(dtype=torch.float32)
+        return torch.clamp(
+            torch.where(torch.isfinite(result), result, torch.full_like(result, -100.0)),
+            -100.0,
+            100.0,
+        )
+
+
+class TorchRewardProgram:
+    def __init__(
+        self,
+        *,
+        component_expressions: dict[str, str] | None,
+        expression: str,
+        allowed_names: set[str] | frozenset[str],
+    ) -> None:
+        validate_component_expressions(component_expressions, allowed_names)
+        self.component_expressions = dict(component_expressions) if component_expressions is not None else {"total": expression}
+        self._components = {
+            name: TorchRewardExpression(component_expression, allowed_names)
+            for name, component_expression in self.component_expressions.items()
+        }
+        self.expression = total_expression_from_components(self.component_expressions, expression)
+
+    @property
+    def component_names(self) -> list[str]:
+        return list(self._components)
+
+    def components(self, values: dict[str, Any]) -> dict[str, Any]:
+        return {name: expression(values) for name, expression in self._components.items()}
+
+    @staticmethod
+    def total_from_components(component_values: dict[str, Any]) -> Any:
+        import torch
+
+        values = list(component_values.values())
+        if not values:
+            raise ValueError("Reward program has no components")
+        total = torch.stack([value.to(dtype=torch.float32) for value in values]).sum(dim=0)
+        return torch.clamp(
+            torch.where(torch.isfinite(total), total, torch.full_like(total, -100.0)),
+            -100.0,
+            100.0,
+        )
+
+
+class TorchRewardComponentTracker:
+    def __init__(self, component_names: list[str], device: Any) -> None:
+        import torch
+
+        self._stats = {
+            name: {
+                "sum": torch.zeros((), dtype=torch.float32, device=device),
+                "count": torch.zeros((), dtype=torch.int64, device=device),
+                "min": torch.full((), float("inf"), dtype=torch.float32, device=device),
+                "max": torch.full((), float("-inf"), dtype=torch.float32, device=device),
+            }
+            for name in component_names
+        }
+
+    def update(self, component_values: dict[str, Any]) -> None:
+        import torch
+
+        for name, values in component_values.items():
+            finite = torch.isfinite(values)
+            stats = self._stats[name]
+            stats["sum"].add_(torch.where(finite, values, torch.zeros_like(values)).sum())
+            stats["count"].add_(finite.sum())
+            stats["min"] = torch.minimum(
+                stats["min"], torch.where(finite, values, torch.full_like(values, float("inf"))).min()
+            )
+            stats["max"] = torch.maximum(
+                stats["max"], torch.where(finite, values, torch.full_like(values, float("-inf"))).max()
+            )
+
+    def summary(self) -> dict[str, dict[str, float]]:
+        summary = {}
+        for name, stats in self._stats.items():
+            count = int(stats["count"].item())
+            if count:
+                summary[name] = {
+                    "mean": float(stats["sum"].item()) / count,
+                    "min": float(stats["min"].item()),
+                    "max": float(stats["max"].item()),
+                }
+        return summary
+
+
 class NumpyWhereTransformer(ast.NodeTransformer):
+    def visit_IfExp(self, node: ast.IfExp) -> ast.AST:
+        return ast.Call(
+            func=ast.Name(id="where", ctx=ast.Load()),
+            args=[self.visit(node.test), self.visit(node.body), self.visit(node.orelse)],
+            keywords=[],
+        )
+
+
+class TorchWhereTransformer(ast.NodeTransformer):
     def visit_IfExp(self, node: ast.IfExp) -> ast.AST:
         return ast.Call(
             func=ast.Name(id="where", ctx=ast.Load()),
@@ -725,3 +1728,32 @@ NUMPY_FUNCS = {
     "exp": np.exp,
     "where": np.where,
 }
+
+
+def torch_functions() -> dict[str, Any]:
+    import torch
+
+    def as_compatible_tensor(value: Any, like: Any) -> Any:
+        return value if torch.is_tensor(value) else torch.as_tensor(value, dtype=torch.float32, device=like.device)
+
+    def unary(op: Any, scalar_op: Any, value: Any) -> Any:
+        return op(value) if torch.is_tensor(value) else scalar_op(value)
+
+    def pairwise(op: Any, scalar_op: Any, left: Any, right: Any) -> Any:
+        if not torch.is_tensor(left) and not torch.is_tensor(right):
+            return scalar_op(left, right)
+        template = left if torch.is_tensor(left) else right
+        return op(as_compatible_tensor(left, template), as_compatible_tensor(right, template))
+
+    return {
+        "abs": lambda value: unary(torch.abs, builtins.abs, value),
+        "min": lambda left, right: pairwise(torch.minimum, builtins.min, left, right),
+        "max": lambda left, right: pairwise(torch.maximum, builtins.max, left, right),
+        "float": lambda value: value.to(dtype=torch.float32) if torch.is_tensor(value) else float(value),
+        "sqrt": lambda value: unary(torch.sqrt, math.sqrt, value),
+        "sin": lambda value: unary(torch.sin, math.sin, value),
+        "cos": lambda value: unary(torch.cos, math.cos, value),
+        "tanh": lambda value: unary(torch.tanh, math.tanh, value),
+        "exp": lambda value: unary(torch.exp, math.exp, value),
+        "where": torch.where,
+    }

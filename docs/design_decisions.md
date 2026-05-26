@@ -27,6 +27,33 @@ Each RLVR iteration contains multiple EUREKA generations. In each generation:
 5. The following generation receives source context, ranked elite reward
    programs, verified scores, lower-ranked examples, and policy diagnostics.
 
+Serious Ant runs retain `4096` worlds per candidate, matching the default
+actor count in public EUREKA's Ant configuration. The inner PPO budget is
+`4096 * 500 * 96 = 196,608,000` control transitions per candidate, matching
+the public EUREKA Ant transition count implied by `4096` actors, horizon `16`,
+and `3000` policy iterations. This is a budget alignment rather than an exact
+Isaac Gym implementation match.
+
+Every executable candidate within an EUREKA generation is trained and verified
+from the same seed. PPO also resets Torch RNG from that seed before policy
+initialization and action sampling. GRPO therefore compares reward-program
+outcomes under paired inner-loop randomness rather than assigning advantage for
+different random policy initializations.
+
+PPO policy training uses a GPU-resident MuJoCo Warp/Torch rollout path by
+default. MuJoCo state, policy observations, actions, reward components, rollout
+buffers, and GAE remain on device between PPO updates. A host rollout mode is
+retained only for regression comparisons.
+
+The default GPU PPO path evaluates all executable candidates in a generation
+in one flattened MuJoCo Warp allocation. At the serious default this is
+`16 * 4096 = 65536` simulated worlds, partitioned into `4096` worlds for each
+independent candidate-specific PPO network. Candidates share initial network
+values and corresponding exploration noise under the generation seed, but
+their gradients and reward programs remain separate. Physics advances use a
+best-effort CUDA graph for the five Ant frame-skip substeps. Both optimizations
+can be disabled independently for ablations.
+
 Prompts include pruned, reward-relevant source excerpts from Gymnasium `AntEnv`
 (`step`, reward, observation, and reset code), the task adapter, and the local
 MJWarp reward/evaluation path. This follows the EUREKA principle of exposing
@@ -54,6 +81,11 @@ a single `total` component.
 
 `verified_reward` means the true environment return obtained by the trained
 policy. It is not replaced by the shaped reward or a failure penalty.
+
+The default verified-return evaluator remains Gym `Ant-v5`, because it is the
+reference environment contract. A batched MuJoCo Warp verifier is implemented
+as an opt-in path for equivalence and scaling measurements; it must not replace
+the Gym default solely because it is faster.
 
 `rlvr_reward` is the scalar used to update the code model. For a successfully
 evaluated reward program, it is the verified true environment return. For an

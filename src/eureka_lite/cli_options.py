@@ -15,12 +15,25 @@ def add_mjwarp_options(parser: argparse.ArgumentParser, *, include_backend: bool
     parser.add_argument("--worlds-per-candidate", type=int, default=4096)
     parser.add_argument("--mjwarp-evaluator", default="ppo", choices=["ppo", "search"])
     parser.add_argument("--mjwarp-episode-steps", type=int, default=500)
-    parser.add_argument("--mjwarp-policy-iterations", type=int, default=4)
+    parser.add_argument("--mjwarp-policy-iterations", type=int, default=96)
     parser.add_argument("--mjwarp-ppo-horizon", type=int, default=32)
     parser.add_argument("--mjwarp-ppo-epochs", type=int, default=4)
     parser.add_argument("--mjwarp-ppo-minibatch-size", type=int, default=16_384)
     parser.add_argument("--mjwarp-ppo-learning-rate", type=float, default=3e-4)
     parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)
+    parser.add_argument("--mjwarp-rollout-mode", choices=["gpu", "host"], default="gpu")
+    parser.add_argument("--mjwarp-verified-evaluator", choices=["mjwarp", "gym"], default="gym")
+    parser.add_argument("--mjwarp-verification-steps", type=int, default=1000)
+    parser.add_argument(
+        "--no-mjwarp-candidate-batching",
+        action="store_true",
+        help="Evaluate MJWarp PPO reward candidates sequentially instead of batching them on one GPU.",
+    )
+    parser.add_argument(
+        "--no-mjwarp-cuda-graph",
+        action="store_true",
+        help="Disable CUDA-graph replay for the MuJoCo Warp physics substeps.",
+    )
 
 
 def add_negative_sample_options(parser: argparse.ArgumentParser) -> None:
