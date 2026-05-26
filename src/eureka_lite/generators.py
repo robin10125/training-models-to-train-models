@@ -2,22 +2,12 @@ from __future__ import annotations
 
 import random
 
+from .adapters import ANT_TASK
 from .rewards import RewardCandidate
 
 
 MOCK_GENERATOR_TYPE = "mock"
 MOCK_GENERATOR_CHECKPOINT = "mock-ant-v1"
-
-
-def cartpole_expression(weights: dict[str, float]) -> str:
-    return (
-        f"{weights['alive']:.4f}"
-        f" - {weights['x']:.4f} * abs(x) / 2.4"
-        f" - {weights['theta']:.4f} * abs(theta) / 0.2095"
-        f" - {weights['x_dot']:.4f} * abs(x_dot) / 3.0"
-        f" - {weights['theta_dot']:.4f} * abs(theta_dot) / 3.5"
-        f" - ({weights['failure']:.4f} if terminated else 0.0)"
-    )
 
 
 def ant_expression(weights: dict[str, float]) -> str:
@@ -32,27 +22,19 @@ def ant_expression(weights: dict[str, float]) -> str:
 
 
 def initial_population(task: str, population: int, rng: random.Random) -> list[RewardCandidate]:
-    if task == "CartPole-v1":
-        return _cartpole_initial_population(population, rng)
-    if task == "Ant-v5":
-        return _ant_initial_population(population, rng)
-    raise ValueError(f"Unsupported task for mock generator: {task}")
+    if task != ANT_TASK:
+        raise ValueError(f"Unsupported task for mock generator: {task}")
+    return _ant_initial_population(population, rng)
 
 
 def mutate_candidate(parent: RewardCandidate, index: int, generation: int, rng: random.Random) -> RewardCandidate:
-    if parent.task == "CartPole-v1":
-        expression_builder = cartpole_expression
-        jitter = 0.05
-    elif parent.task == "Ant-v5":
-        expression_builder = ant_expression
-        jitter = 0.02
-    else:
+    if parent.task != ANT_TASK:
         raise ValueError(f"Unsupported task for mock generator: {parent.task}")
 
     weights = dict(parent.weights)
     for key in weights:
-        weights[key] = max(0.0, weights[key] * rng.uniform(0.65, 1.45) + rng.uniform(-jitter, jitter))
-    expression = expression_builder(weights)
+        weights[key] = max(0.0, weights[key] * rng.uniform(0.65, 1.45) + rng.uniform(-0.02, 0.02))
+    expression = ant_expression(weights)
     return _candidate(
         name=f"gen{generation}_mut{index}_from_{parent.name}",
         task=parent.task,
@@ -64,47 +46,6 @@ def mutate_candidate(parent: RewardCandidate, index: int, generation: int, rng: 
         eureka_parent_names=[parent.name],
         eureka_parent_expressions=[parent.expression],
     )
-
-
-def _cartpole_initial_population(population: int, rng: random.Random) -> list[RewardCandidate]:
-    baseline_weights = {
-        "alive": 1.0,
-        "x": 0.6,
-        "theta": 2.4,
-        "x_dot": 0.05,
-        "theta_dot": 0.15,
-        "failure": 4.0,
-    }
-    candidates = [
-        _candidate(
-            name="baseline_angle_position",
-            task="CartPole-v1",
-            prompt_id="cartpole_reward_design_v1",
-            expression=cartpole_expression(baseline_weights),
-            weights=baseline_weights,
-            generation=0,
-        )
-    ]
-    for index in range(max(0, population - 1)):
-        weights = {
-            "alive": rng.uniform(0.7, 1.4),
-            "x": rng.uniform(0.1, 2.0),
-            "theta": rng.uniform(0.5, 4.0),
-            "x_dot": rng.uniform(0.0, 0.5),
-            "theta_dot": rng.uniform(0.0, 0.8),
-            "failure": rng.uniform(1.0, 8.0),
-        }
-        candidates.append(
-            _candidate(
-                name=f"gen0_random{index}",
-                task="CartPole-v1",
-                prompt_id="cartpole_reward_design_v1",
-                expression=cartpole_expression(weights),
-                weights=weights,
-                generation=0,
-            )
-        )
-    return candidates
 
 
 def _ant_initial_population(population: int, rng: random.Random) -> list[RewardCandidate]:
@@ -119,7 +60,7 @@ def _ant_initial_population(population: int, rng: random.Random) -> list[RewardC
     candidates = [
         _candidate(
             name="baseline_forward_survive",
-            task="Ant-v5",
+            task=ANT_TASK,
             prompt_id="ant_reward_design_v1",
             expression=ant_expression(baseline_weights),
             weights=baseline_weights,
@@ -138,7 +79,7 @@ def _ant_initial_population(population: int, rng: random.Random) -> list[RewardC
         candidates.append(
             _candidate(
                 name=f"gen0_random{index}",
-                task="Ant-v5",
+                task=ANT_TASK,
                 prompt_id="ant_reward_design_v1",
                 expression=ant_expression(weights),
                 weights=weights,

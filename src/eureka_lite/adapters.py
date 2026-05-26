@@ -6,6 +6,9 @@ from typing import Any, Protocol
 import numpy as np
 
 
+ANT_TASK = "Ant-v5"
+
+
 class TaskAdapter(Protocol):
     task_id: str
     prompt_id: str
@@ -28,49 +31,8 @@ def scalar_action_l2(action: Any) -> float:
 
 
 @dataclass(frozen=True)
-class CartPoleAdapter:
-    task_id: str = "CartPole-v1"
-    prompt_id: str = "cartpole_reward_design_v1"
-    reward_variables: frozenset[str] = frozenset(
-        {
-            "x",
-            "x_dot",
-            "theta",
-            "theta_dot",
-            "action",
-            "original_reward",
-            "terminated",
-            "truncated",
-        }
-    )
-
-    def reward_context(
-        self,
-        obs: np.ndarray,
-        action: Any,
-        original_reward: float,
-        terminated: bool,
-        truncated: bool,
-        info: dict[str, Any],
-    ) -> dict[str, float | bool]:
-        del info
-        x, x_dot, theta, theta_dot = [float(v) for v in obs]
-        action_value = float(np.asarray(action).reshape(-1)[0])
-        return {
-            "x": x,
-            "x_dot": x_dot,
-            "theta": theta,
-            "theta_dot": theta_dot,
-            "action": action_value,
-            "original_reward": float(original_reward),
-            "terminated": terminated,
-            "truncated": truncated,
-        }
-
-
-@dataclass(frozen=True)
 class AntAdapter:
-    task_id: str = "Ant-v5"
+    task_id: str = ANT_TASK
     prompt_id: str = "ant_reward_design_v1"
     reward_variables: frozenset[str] = frozenset(
         {
@@ -117,16 +79,10 @@ class AntAdapter:
         }
 
 
-ADAPTERS: dict[str, TaskAdapter] = {
-    "CartPole-v1": CartPoleAdapter(),
-    "Ant-v5": AntAdapter(),
-}
+ANT_ADAPTER = AntAdapter()
 
 
 def get_adapter(task: str) -> TaskAdapter:
-    try:
-        return ADAPTERS[task]
-    except KeyError as exc:
-        supported = ", ".join(sorted(ADAPTERS))
-        raise ValueError(f"Unsupported task {task!r}. Supported tasks: {supported}") from exc
-
+    if task != ANT_TASK:
+        raise ValueError(f"Unsupported task {task!r}. Supported task: {ANT_TASK}")
+    return ANT_ADAPTER

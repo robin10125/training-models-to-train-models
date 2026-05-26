@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import ast
+import inspect
 import re
 from dataclasses import dataclass
 from typing import Any
 
 import torch
+from gymnasium.envs.mujoco.ant_v5 import AntEnv
 
-from .adapters import get_adapter
-from .rewards import RewardCandidate, RewardExpression
+from .adapters import ANT_TASK, AntAdapter, get_adapter
+from . import mjwarp_evaluator
+from .rewards import RewardCandidate, RewardExpression, total_expression_from_components, validate_component_expressions
 
 
 DEFAULT_HF_MODEL_ID = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
@@ -61,6 +65,7 @@ class HfRewardGenerator:
         self.generator_checkpoint = (
             config.model_id if config.adapter_path is None else f"{config.model_id}+adapter:{config.adapter_path}"
         )
+        self._rejected_candidates: list[tuple[RewardCandidate, str]] = []
 
     def generate_population(
         self,
@@ -71,18 +76,30 @@ class HfRewardGenerator:
         best_expression: str | None = None,
         best_score: float | None = None,
         elites: list[dict[str, Any]] | None = None,
+        evolution_feedback: str | None = None,
     ) -> list[RewardCandidate]:
-        return [
-            self.generate_candidate(
-                task=task,
-                index=index,
-                generation=generation,
-                best_expression=best_expression,
-                best_score=best_score,
-                elites=elites,
-            )
-            for index in range(population)
-        ]
+        candidates = []
+        for index in range(population):
+            try:
+                candidates.append(
+                    self.generate_candidate(
+                        task=task,
+                        index=index,
+                        generation=generation,
+                        best_expression=best_expression,
+                        best_score=best_score,
+                        elites=elites,
+                        evolution_feedback=evolution_feedback,
+                    )
+                )
+            except ValueError:
+                continue
+        return candidates
+
+    def drain_rejected_candidates(self) -> list[tuple[RewardCandidate, str]]:
+        rejected = self._rejected_candidates
+        self._rejected_candidates = []
+        return rejected
 
     def generate_candidate(
         self,
@@ -93,11 +110,12 @@ class HfRewardGenerator:
         best_expression: str | None,
         best_score: float | None,
         elites: list[dict[str, Any]] | None = None,
+        evolution_feedback: str | None = None,
     ) -> RewardCandidate:
         adapter = get_adapter(task)
         prompt = ""
         last_error: Exception | None = None
-        eureka_feedback = format_eureka_feedback(elites)
+        eureka_feedback = evolution_feedback or format_eureka_feedback(elites)
         for attempt in range(3):
             prompt = build_reward_prompt(
                 task=task,
@@ -105,6 +123,7 @@ class HfRewardGenerator:
                 best_expression=best_expression,
                 best_score=best_score,
                 elites=elites,
+                evolution_feedback=eureka_feedback,
                 invalid_feedback=None if last_error is None else str(last_error),
             )
             text = self._chat_text(prompt)
@@ -125,20 +144,51 @@ class HfRewardGenerator:
             prompt_len = int(inputs.input_ids.shape[-1])
             completion_token_ids = output.sequences[0][prompt_len:].tolist()
             completion_text = self.tokenizer.decode(completion_token_ids, skip_special_tokens=True)
+            old_logprobs = token_logprobs(output.scores, completion_token_ids)
             try:
-                expression = extract_reward_expression(completion_text)
+                component_expressions = extract_reward_components(completion_text)
+                expression = total_expression_from_components(component_expressions, "")
+                validate_component_expressions(component_expressions, adapter.reward_variables)
                 RewardExpression(expression, adapter.reward_variables)
             except ValueError as exc:
                 last_error = exc
+                self._rejected_candidates.append(
+                    (
+                        RewardCandidate(
+                            name=f"gen{generation}_hf{index}_invalid{attempt}",
+                            task=task,
+                            prompt_id=adapter.prompt_id,
+                            prompt=text,
+                            expression=completion_text.strip(),
+                            completion_text=completion_text.strip(),
+                            weights={},
+                            generation=generation,
+                            generator_type="hf",
+                            generator_checkpoint=self.generator_checkpoint,
+                            completion_token_ids=completion_token_ids,
+                            old_logprobs=old_logprobs,
+                            eureka_role="invalid_initial" if not elites else "invalid_elite_refinement",
+                            eureka_parent_names=[str(item.get("name")) for item in elites] if elites else None,
+                            eureka_parent_expressions=[str(item.get("expression")) for item in elites] if elites else None,
+                            eureka_parent_scores=[item.get("score") for item in elites] if elites else None,
+                            eureka_elite_names=[str(item.get("name")) for item in elites] if elites else None,
+                            eureka_elite_expressions=[str(item.get("expression")) for item in elites] if elites else None,
+                            eureka_elite_scores=[item.get("score") for item in elites] if elites else None,
+                            eureka_feedback=eureka_feedback,
+                        ),
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                )
                 continue
 
-            old_logprobs = token_logprobs(output.scores, completion_token_ids)
             return RewardCandidate(
                 name=f"gen{generation}_hf{index}",
                 task=task,
                 prompt_id=adapter.prompt_id,
-                prompt=prompt,
+                prompt=text,
                 expression=expression,
+                component_expressions=component_expressions,
+                completion_text=completion_text.strip(),
                 weights={},
                 generation=generation,
                 generator_type="hf",
@@ -177,10 +227,18 @@ def build_reward_prompt(
     best_expression: str | None,
     best_score: float | None,
     elites: list[dict[str, Any]] | None = None,
+    evolution_feedback: str | None = None,
     invalid_feedback: str | None = None,
 ) -> str:
     feedback = ""
-    if elites:
+    if evolution_feedback:
+        feedback = (
+            "\nEUREKA evolutionary feedback from the previous generation:\n"
+            f"{evolution_feedback}\n"
+            "Use this feedback as evidence. Preserve reward terms that produced better verified return, "
+            "remove terms that appear to reward the wrong behavior, and produce one new expression.\n"
+        )
+    elif elites:
         feedback = (
             "\nEUREKA elite archive from the previous generation, ranked by true Ant-v5 return:\n"
             f"{format_eureka_feedback(elites)}\n"
@@ -204,14 +262,53 @@ def build_reward_prompt(
 
     return (
         f"Design one dense reward expression for {task}.\n"
-        "Return only a single Python expression, not a function, markdown, comments, or explanation.\n"
+        "Return only a Python dictionary literal mapping reward component names to Python expression strings. "
+        "Do not return a function, markdown, comments, or explanation. Example:\n"
+        "{\"forward\": \"x_velocity\", \"upright\": \"0.5 * survive_reward\", \"control\": \"-0.01 * action_l2\"}\n"
+        f"{task_prompt_context(task)}\n"
         "The expression will be parsed with Python ast and may only use numeric operators, conditionals, "
         "comparisons, abs, min, max, sqrt, sin, cos, tanh, exp, and these variables:\n"
         f"{', '.join(reward_variables)}\n"
-        "The expression trains PPO. It will be scored only by true environment return, not by its own value.\n"
+        "The component expressions will be summed to train PPO. They will be scored only by true environment return, not by their own value.\n"
         "Prefer forward progress, stable healthy locomotion, low lateral drift, and modest control cost.\n"
         f"{feedback}"
         f"{retry}"
+    )
+
+
+def task_prompt_context(task: str) -> str:
+    if task != ANT_TASK:
+        raise ValueError(f"Unsupported task for prompt context: {task}")
+    return (
+        "Task context:\n"
+        "- The agent is a MuJoCo Ant quadruped. The policy controls 8 continuous joint torques.\n"
+        "- The target behavior is fast, stable forward locomotion in +x without falling.\n"
+        "- `x_velocity` and `forward_reward` are forward progress terms; larger positive values are better.\n"
+        "- `y_velocity` is lateral drift and is usually something to penalize by magnitude.\n"
+        "- `torso_z` is torso height. Healthy Ant height is approximately in [0.2, 1.0], with useful walking often around 0.5-0.8.\n"
+        "- `action_l2` is squared action magnitude. `control_cost` is the environment action penalty, approximately 0.005 * action_l2.\n"
+        "- `survive_reward` is 1.0 while healthy. `healthy` is false when the ant falls or becomes invalid.\n"
+        "- `original_reward = forward_reward + survive_reward - control_cost` is used only for final verification.\n"
+        "- Your generated expression trains the policy, but model reward is assigned from the final true environment return.\n"
+        "- Avoid rewarding large sideways velocity, falling, excessive action, or gaming `original_reward` without locomotion.\n"
+        f"{source_context()}"
+    )
+
+
+def source_context() -> str:
+    adapter_source = inspect.getsource(AntAdapter)
+    gym_source = "\n".join(
+        inspect.getsource(getattr(AntEnv, method_name))
+        for method_name in ("step", "_get_rew", "_get_obs", "reset_model")
+    )
+    reward_source = inspect.getsource(mjwarp_evaluator.ant_rewards)
+    return (
+        "\nEnvironment source code excerpt:\n"
+        "```python\n"
+        f"{gym_source}\n"
+        f"{adapter_source}\n"
+        f"{reward_source}\n"
+        "```\n"
     )
 
 
@@ -246,6 +343,33 @@ def extract_reward_expression(text: str) -> str:
     if "=" in expression and not any(op in expression for op in ("==", "!=", "<=", ">=")):
         expression = expression.split("=", 1)[1].strip()
     return expression.strip().strip("`")
+
+
+def extract_reward_components(text: str) -> dict[str, str]:
+    stripped = text.strip()
+    code_fence = re.search(r"```(?:python|json)?\s*(.*?)```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    if code_fence:
+        stripped = code_fence.group(1).strip()
+    for prefix in ("REWARD_COMPONENTS =", "reward_components =", "components =", "return "):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :].strip()
+    try:
+        parsed = ast.literal_eval(stripped)
+    except (SyntaxError, ValueError):
+        expression = extract_reward_expression(text)
+        return {"total": expression}
+    if isinstance(parsed, str):
+        return {"total": parsed}
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError("HF generator must return a non-empty dict of reward component expressions")
+    components = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str) or not key.isidentifier():
+            raise ValueError(f"Invalid reward component name: {key!r}")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Invalid reward component expression for {key!r}")
+        components[key] = value.strip()
+    return components
 
 
 def token_logprobs(scores: tuple[Any, ...], token_ids: list[int]) -> list[float]:

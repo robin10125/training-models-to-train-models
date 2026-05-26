@@ -7,17 +7,27 @@ The loop is:
 
 1. Sample reward-code candidates from a coding model.
 2. Run a full EUREKA search inside each RLVR iteration: rank candidates, keep
-   elites, and feed the elite archive into the next refinement prompt.
+   elites, and feed task context plus evolutionary feedback into the next
+   refinement prompt.
 3. Use each reward candidate to train an Ant PPO policy in MuJoCo Warp.
 4. Evaluate the resulting policies with the true `Ant-v5` environment return.
-5. Store prompt, completion tokens, old logprobs, EUREKA lineage, elite context,
-   and verified return as RLVR data.
+5. Store structured reward components, prompt, completion tokens, old logprobs,
+   EUREKA lineage, elite context, reflection feedback, and verified return as
+   RLVR data.
 6. Train a LoRA adapter with GRPO, then use that adapter to sample the next
    round.
 
 The default full pipeline is iterative: each iteration evaluates a batch of
 reward candidates, trains an adapter from verified EUREKA performance, and uses
-the new adapter in the next iteration.
+the new adapter in the next iteration. Prompts include Ant task source excerpts
+and ask the model for named reward components so the evaluator can report
+component-level statistics during reflection. Invalid generated reward code and
+failed evaluations are included as penalized RLVR samples by default.
+
+Design rationale is documented in [docs/design_decisions.md](docs/design_decisions.md).
+All run flags are listed in [docs/command_line_reference.md](docs/command_line_reference.md).
+The GPU-resident Ant PPO refactor is planned in
+[docs/gpu_rollout_optimization_plan.md](docs/gpu_rollout_optimization_plan.md).
 
 ## Setup
 
@@ -68,6 +78,13 @@ PPO actor-critic network per reward candidate. The default MJWarp evaluator is
 
 The serious run defaults can be changed with `--generations`, `--eureka-elites`,
 `--population`, and `--worlds-per-candidate`.
+
+To exclude invalid code and failed evaluations from model updates for an
+ablation run:
+
+```bash
+./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20 --no-negative-rlvr-samples
+```
 
 Outputs are written under:
 

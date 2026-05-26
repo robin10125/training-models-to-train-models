@@ -62,6 +62,8 @@ class RewardCandidate:
     prompt: str
     expression: str
     weights: dict[str, float]
+    component_expressions: dict[str, str] | None = None
+    completion_text: str | None = None
     generation: int = 0
     generator_type: str = "mock"
     generator_checkpoint: str = "mock-v1"
@@ -101,6 +103,25 @@ class RewardExpression:
             if isinstance(child, ast.Call):
                 if not isinstance(child.func, ast.Name) or child.func.id not in ALLOWED_FUNCS:
                     raise ValueError("Reward expressions can only call approved math helpers")
+
+
+def total_expression_from_components(component_expressions: dict[str, str] | None, fallback: str) -> str:
+    if not component_expressions:
+        return fallback
+    return " + ".join(f"({expression})" for expression in component_expressions.values())
+
+
+def validate_component_expressions(
+    component_expressions: dict[str, str] | None, allowed_names: set[str] | frozenset[str]
+) -> None:
+    if component_expressions is None:
+        return
+    if not component_expressions:
+        raise ValueError("Reward program must include at least one component")
+    for name, expression in component_expressions.items():
+        if not name.isidentifier():
+            raise ValueError(f"Reward component name must be a Python identifier: {name!r}")
+        RewardExpression(expression, allowed_names)
 
 
 class RewardWrapper(gym.Wrapper):

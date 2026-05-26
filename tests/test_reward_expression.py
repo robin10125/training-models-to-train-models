@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from eureka_lite.adapters import AntAdapter
-from eureka_lite.rewards import RewardExpression
+from eureka_lite.rewards import RewardExpression, validate_component_expressions
 
 
 class RewardExpressionTests(unittest.TestCase):
@@ -28,6 +28,10 @@ class RewardExpressionTests(unittest.TestCase):
     def test_expression_rejects_unknown_name(self) -> None:
         with self.assertRaises(ValueError):
             RewardExpression("__import__('os').system('true')", AntAdapter().reward_variables)
+
+    def test_empty_structured_reward_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_component_expressions({}, AntAdapter().reward_variables)
 
 
 class AntAdapterTests(unittest.TestCase):
@@ -56,4 +60,3 @@ class AntAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

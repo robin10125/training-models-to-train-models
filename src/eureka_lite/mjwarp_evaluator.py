@@ -9,7 +9,13 @@ import gymnasium as gym
 import numpy as np
 
 from .adapters import get_adapter
-from .rewards import ALLOWED_FUNCS, RewardCandidate, RewardExpression
+from .rewards import (
+    ALLOWED_FUNCS,
+    RewardCandidate,
+    RewardExpression,
+    total_expression_from_components,
+    validate_component_expressions,
+)
 
 
 @dataclass(frozen=True)
@@ -64,7 +70,11 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
 
     started_at = time.monotonic()
     adapter = get_adapter(config.task)
-    reward_expression = VectorizedRewardExpression(candidate.expression, adapter.reward_variables)
+    reward_program = VectorizedRewardProgram(
+        component_expressions=candidate.component_expressions,
+        expression=candidate.expression,
+        allowed_names=adapter.reward_variables,
+    )
     rng = np.random.default_rng(config.seed)
 
     env = gym.make(config.task)
@@ -84,7 +94,7 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
                     mjm=mjm,
                     obs_dim=obs_dim,
                     action_dim=action_dim,
-                    reward_expression=reward_expression,
+                    reward_program=reward_program,
                     config=config,
                     dt=dt,
                     wp=wp,
@@ -98,7 +108,7 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
                     mjm=mjm,
                     obs_dim=obs_dim,
                     action_dim=action_dim,
-                    reward_expression=reward_expression,
+                    reward_program=reward_program,
                     config=config,
                     dt=dt,
                     rng=rng,
@@ -134,6 +144,7 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
             "ppo_minibatch_size": config.ppo_minibatch_size,
             "ppo_hidden_sizes": [256, 128, 64],
             "elite_frac": config.elite_frac,
+            "reward_components": reward_program.component_expressions,
             "best_shaped_return": best_shaped_return,
             "iteration_summaries": iteration_summaries,
         },
@@ -146,7 +157,7 @@ def rollout_policy_population(
     data: Any,
     mjm: Any,
     params: np.ndarray,
-    reward_expression: "VectorizedRewardExpression",
+    reward_program: "VectorizedRewardProgram",
     episode_steps: int,
     dt: float,
     device: str,
@@ -161,6 +172,7 @@ def rollout_policy_population(
     shaped_returns = np.zeros(worlds, dtype=np.float32)
     true_returns = np.zeros(worlds, dtype=np.float32)
     terminated = np.zeros(worlds, dtype=bool)
+    component_tracker = RewardComponentTracker(reward_program.component_names)
 
     mjw.reset_data(model, data)
     wp.synchronize()
@@ -202,12 +214,14 @@ def rollout_policy_population(
             "terminated": just_terminated,
             "truncated": np.zeros(worlds, dtype=bool),
         }
-        shaped_reward = reward_expression(context)
+        component_values = reward_program.components(context)
+        component_tracker.update(component_values)
+        shaped_reward = reward_program.total_from_components(component_values)
         shaped_returns += np.where(active, shaped_reward, 0.0).astype(np.float32)
         true_returns += np.where(active, original_reward, 0.0).astype(np.float32)
         if terminated.all():
             break
-    return shaped_returns, true_returns
+    return shaped_returns, true_returns, component_tracker.summary()
 
 
 def train_search_policy(
@@ -217,7 +231,7 @@ def train_search_policy(
     mjm: Any,
     obs_dim: int,
     action_dim: int,
-    reward_expression: "VectorizedRewardExpression",
+    reward_program: "VectorizedRewardProgram",
     config: MjwarpEvaluatorConfig,
     dt: float,
     rng: np.random.Generator,
@@ -232,12 +246,12 @@ def train_search_policy(
     iteration_summaries = []
     for iteration in range(config.policy_iterations):
         params = rng.normal(mean, std, size=(config.worlds_per_candidate, param_dim)).astype(np.float32)
-        shaped_returns, true_returns = rollout_policy_population(
+        shaped_returns, true_returns, component_stats = rollout_policy_population(
             model=model,
             data=data,
             mjm=mjm,
             params=params,
-            reward_expression=reward_expression,
+            reward_program=reward_program,
             episode_steps=config.episode_steps,
             dt=dt,
             device=config.device,
@@ -259,6 +273,7 @@ def train_search_policy(
                 "mean_shaped_return": float(np.mean(shaped_returns)),
                 "best_shaped_return": float(np.max(shaped_returns)),
                 "best_true_return_in_population": float(true_returns[best_index]),
+                "reward_component_stats": component_stats,
             }
         )
     return best_params, best_shaped_return, iteration_summaries
@@ -271,7 +286,7 @@ def train_ppo_policy(
     mjm: Any,
     obs_dim: int,
     action_dim: int,
-    reward_expression: "VectorizedRewardExpression",
+    reward_program: "VectorizedRewardProgram",
     config: MjwarpEvaluatorConfig,
     dt: float,
     wp: Any,
@@ -290,6 +305,7 @@ def train_ppo_policy(
     dones = np.zeros(config.worlds_per_candidate, dtype=bool)
     episode_shaped = np.zeros(config.worlds_per_candidate, dtype=np.float32)
     episode_true = np.zeros(config.worlds_per_candidate, dtype=np.float32)
+    component_tracker = RewardComponentTracker(reward_program.component_names)
 
     chunks_per_iteration = max(1, int(np.ceil(config.episode_steps / config.ppo_horizon)))
     update_index = 0
@@ -316,14 +332,15 @@ def train_ppo_policy(
 
                 qpos_after = np.asarray(data.qpos.numpy(), dtype=np.float32)
                 qvel_after = np.asarray(data.qvel.numpy(), dtype=np.float32)
-                shaped_reward, true_reward, next_dones = ant_rewards(
+                shaped_reward, true_reward, next_dones, component_values = ant_rewards(
                     qpos_before=qpos_before,
                     qpos_after=qpos_after,
                     qvel_after=qvel_after,
                     action=action,
-                    reward_expression=reward_expression,
+                    reward_program=reward_program,
                     dt=dt,
                 )
+                component_tracker.update(component_values)
                 active = ~dones
                 shaped_reward = np.where(active, shaped_reward, 0.0).astype(np.float32)
                 true_reward = np.where(active, true_reward, 0.0).astype(np.float32)
@@ -382,6 +399,7 @@ def train_ppo_policy(
                     "mean_shaped_return": mean_shaped,
                     "best_shaped_return": max_shaped,
                     "mean_true_return_in_population": float(np.mean(episode_true)),
+                    "reward_component_stats": component_tracker.summary(),
                 }
             )
             update_index += 1
@@ -402,9 +420,9 @@ def ant_rewards(
     qpos_after: np.ndarray,
     qvel_after: np.ndarray,
     action: np.ndarray,
-    reward_expression: "VectorizedRewardExpression",
+    reward_program: "VectorizedRewardProgram",
     dt: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     x_velocity = (qpos_after[:, 0] - qpos_before[:, 0]) / dt
     y_velocity = (qpos_after[:, 1] - qpos_before[:, 1]) / dt
     torso_z = qpos_after[:, 2]
@@ -428,8 +446,9 @@ def ant_rewards(
         "terminated": ~healthy,
         "truncated": np.zeros(len(action), dtype=bool),
     }
-    shaped_reward = reward_expression(context)
-    return shaped_reward.astype(np.float32), original_reward.astype(np.float32), (~healthy)
+    component_values = reward_program.components(context)
+    shaped_reward = reward_program.total_from_components(component_values)
+    return shaped_reward.astype(np.float32), original_reward.astype(np.float32), (~healthy), component_values
 
 
 def compute_gae(
@@ -609,6 +628,80 @@ class VectorizedRewardExpression:
                 row = {key: value[index].item() for key, value in values.items()}
                 rewards[index] = self._scalar(row)
             return rewards
+
+
+class VectorizedRewardProgram:
+    def __init__(
+        self,
+        *,
+        component_expressions: dict[str, str] | None,
+        expression: str,
+        allowed_names: set[str] | frozenset[str],
+    ) -> None:
+        validate_component_expressions(component_expressions, allowed_names)
+        if component_expressions is not None:
+            self.component_expressions = dict(component_expressions)
+        else:
+            self.component_expressions = {"total": expression}
+        self._components = {
+            name: VectorizedRewardExpression(component_expression, allowed_names)
+            for name, component_expression in self.component_expressions.items()
+        }
+        self.expression = total_expression_from_components(self.component_expressions, expression)
+
+    @property
+    def component_names(self) -> list[str]:
+        return list(self._components)
+
+    def components(self, values: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        return {name: expression(values) for name, expression in self._components.items()}
+
+    def __call__(self, values: dict[str, np.ndarray]) -> np.ndarray:
+        return self.total_from_components(self.components(values))
+
+    @staticmethod
+    def total_from_components(component_values: dict[str, np.ndarray]) -> np.ndarray:
+        total = None
+        for value in component_values.values():
+            total = value.astype(np.float32) if total is None else total + value.astype(np.float32)
+        if total is None:
+            raise ValueError("Reward program has no components")
+        return np.clip(np.where(np.isfinite(total), total, -100.0), -100.0, 100.0).astype(np.float32)
+
+
+class RewardComponentTracker:
+    def __init__(self, component_names: list[str]) -> None:
+        self._stats = {
+            name: {"sum": 0.0, "count": 0, "min": float("inf"), "max": float("-inf")}
+            for name in component_names
+        }
+
+    def update(self, component_values: dict[str, np.ndarray]) -> None:
+        for name, values in component_values.items():
+            finite_values = np.asarray(values, dtype=np.float32)
+            finite_values = finite_values[np.isfinite(finite_values)]
+            if finite_values.size == 0:
+                continue
+            stats = self._stats.setdefault(
+                name, {"sum": 0.0, "count": 0, "min": float("inf"), "max": float("-inf")}
+            )
+            stats["sum"] += float(np.sum(finite_values))
+            stats["count"] += int(finite_values.size)
+            stats["min"] = min(float(stats["min"]), float(np.min(finite_values)))
+            stats["max"] = max(float(stats["max"]), float(np.max(finite_values)))
+
+    def summary(self) -> dict[str, dict[str, float]]:
+        summary = {}
+        for name, stats in self._stats.items():
+            count = int(stats["count"])
+            if count == 0:
+                continue
+            summary[name] = {
+                "mean": float(stats["sum"]) / count,
+                "min": float(stats["min"]),
+                "max": float(stats["max"]),
+            }
+        return summary
 
 
 class NumpyWhereTransformer(ast.NodeTransformer):

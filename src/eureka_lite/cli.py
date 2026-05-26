@@ -7,45 +7,27 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from .adapters import ADAPTERS
+from .adapters import ANT_TASK
+from .cli_options import add_eureka_options, add_generation_options, add_mjwarp_options, add_negative_sample_options
 from .hf_generator import DEFAULT_HF_MODEL_ID
-from .search import run_search
+from .search import RunConfig, run_search
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Small EUREKA-inspired reward search.")
-    parser.add_argument(
-        "--task",
-        default="Ant-v5",
-        choices=sorted(ADAPTERS),
-        help="Gymnasium task. Ant-v5 is the local EUREKA-style default.",
-    )
-    parser.add_argument("--generations", type=int, default=3)
-    parser.add_argument("--population", type=int, default=4)
-    parser.add_argument("--eureka-elites", type=int, default=4)
+    add_eureka_options(parser, population_default=4)
     parser.add_argument("--timesteps", type=int, default=10_000)
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--n-envs", type=int, default=4)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    parser.add_argument("--sim-backend", default="sb3", choices=["sb3", "mjwarp"])
-    parser.add_argument("--worlds-per-candidate", type=int, default=4096)
-    parser.add_argument("--mjwarp-evaluator", default="ppo", choices=["ppo", "search"])
-    parser.add_argument("--mjwarp-episode-steps", type=int, default=500)
-    parser.add_argument("--mjwarp-policy-iterations", type=int, default=4)
-    parser.add_argument("--mjwarp-ppo-horizon", type=int, default=32)
-    parser.add_argument("--mjwarp-ppo-epochs", type=int, default=4)
-    parser.add_argument("--mjwarp-ppo-minibatch-size", type=int, default=16_384)
-    parser.add_argument("--mjwarp-ppo-learning-rate", type=float, default=3e-4)
-    parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)
+    add_mjwarp_options(parser, include_backend=True)
+    add_negative_sample_options(parser)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/latest"))
     parser.add_argument("--generator", default="mock", choices=["mock", "hf"])
     parser.add_argument("--model-id", default=DEFAULT_HF_MODEL_ID)
     parser.add_argument("--adapter-path", default=None)
-    parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit quantized HF model loading.")
+    add_generation_options(parser)
     parser.add_argument("--resume", action="store_true", help="Resume from output-dir/checkpoint.json.")
     parser.add_argument("--overwrite", action="store_true", help="Replace existing run artifacts in output-dir.")
     return parser.parse_args()
@@ -59,32 +41,19 @@ def main() -> None:
         raise SystemExit("--generations must be at least 1")
     if args.eureka_elites < 1:
         raise SystemExit("--eureka-elites must be at least 1")
+    if args.negative_rlvr_margin <= 0:
+        raise SystemExit("--negative-rlvr-margin must be greater than 0")
 
-    console = Console()
-    display_args = args
-    if args.resume:
-        checkpoint_path = args.output_dir / "checkpoint.json"
-        if checkpoint_path.exists():
-            config = json.loads(checkpoint_path.read_text(encoding="utf-8"))["config"]
-            for key, value in config.items():
-                setattr(display_args, key, value)
-    console.print(
-        f"Running reward search: task={display_args.task}, generations={display_args.generations}, "
-        f"population={display_args.population}, timesteps={display_args.timesteps}, device={display_args.device}, "
-        f"generator={display_args.generator}, sim_backend={display_args.sim_backend}"
-    )
-
-    results = run_search(
-        task=args.task,
+    config = RunConfig(
+        task=ANT_TASK,
         generations=args.generations,
         population=args.population,
+        eureka_elites=args.eureka_elites,
         timesteps=args.timesteps,
         eval_episodes=args.eval_episodes,
         n_envs=args.n_envs,
         seed=args.seed,
         device=args.device,
-        output_dir=args.output_dir,
-        eureka_elites=args.eureka_elites,
         generator=args.generator,
         model_id=args.model_id,
         adapter_path=args.adapter_path,
@@ -102,6 +71,25 @@ def main() -> None:
         mjwarp_ppo_minibatch_size=args.mjwarp_ppo_minibatch_size,
         mjwarp_ppo_learning_rate=args.mjwarp_ppo_learning_rate,
         mjwarp_elite_frac=args.mjwarp_elite_frac,
+        include_negative_rlvr_samples=not args.no_negative_rlvr_samples,
+        negative_rlvr_margin=args.negative_rlvr_margin,
+    )
+
+    console = Console()
+    display_config = config
+    if args.resume:
+        checkpoint_path = args.output_dir / "checkpoint.json"
+        if checkpoint_path.exists():
+            display_config = RunConfig.from_dict(json.loads(checkpoint_path.read_text(encoding="utf-8"))["config"])
+    console.print(
+        f"Running reward search: task={display_config.task}, generations={display_config.generations}, "
+        f"population={display_config.population}, timesteps={display_config.timesteps}, device={display_config.device}, "
+        f"generator={display_config.generator}, sim_backend={display_config.sim_backend}"
+    )
+
+    results = run_search(
+        config,
+        output_dir=args.output_dir,
         resume=args.resume,
         overwrite=args.overwrite,
     )

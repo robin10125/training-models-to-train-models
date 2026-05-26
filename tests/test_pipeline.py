@@ -28,7 +28,7 @@ class PipelineTests(unittest.TestCase):
             collection_dir = run_root / "iteration_000" / "collection"
             adapter_dir = run_root / "iteration_000" / "adapter"
 
-            def fake_run_search(**kwargs):
+            def fake_run_search(_config, **kwargs):
                 collection_dir.mkdir(parents=True, exist_ok=True)
                 (collection_dir / "rlvr_records.jsonl").write_text(
                     json.dumps(
@@ -68,6 +68,8 @@ class PipelineTests(unittest.TestCase):
                             mjwarp_ppo_minibatch_size=16_384,
                             mjwarp_ppo_learning_rate=3e-4,
                             mjwarp_elite_frac=0.1,
+                            include_negative_rlvr_samples=True,
+                            negative_rlvr_margin=1.0,
                             eval_episodes=5,
                             seed=7,
                             device="cuda",
@@ -94,8 +96,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(summary["iterations_completed"], 1)
         self.assertEqual(summary["iterations"][0]["collection_results"], 1)
         self.assertEqual(summary["iterations"][0]["trainer_status"], "trained")
-        self.assertEqual(run_search_mock.call_args.kwargs["sim_backend"], "mjwarp")
-        self.assertEqual(run_search_mock.call_args.kwargs["worlds_per_candidate"], 4096)
+        search_config = run_search_mock.call_args.args[0]
+        self.assertEqual(search_config.sim_backend, "mjwarp")
+        self.assertEqual(search_config.worlds_per_candidate, 4096)
+        self.assertTrue(search_config.include_negative_rlvr_samples)
         self.assertEqual(train_mock.call_args.args[0].algorithm, "grpo")
 
     def test_iterative_pipeline_uses_previous_adapter_for_next_collection(self) -> None:
@@ -112,7 +116,7 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_root = Path(tmp) / "run"
 
-            def fake_run_search(**kwargs):
+            def fake_run_search(search_config, **kwargs):
                 collection_dir = Path(kwargs["output_dir"])
                 collection_dir.mkdir(parents=True, exist_ok=True)
                 (collection_dir / "rlvr_records.jsonl").write_text(
@@ -125,7 +129,7 @@ class PipelineTests(unittest.TestCase):
                             "completion_token_ids": [1],
                             "old_logprobs": [-0.1],
                             "prompt_id": "p",
-                            "generator_checkpoint": kwargs.get("adapter_path") or "base",
+                            "generator_checkpoint": search_config.adapter_path or "base",
                         }
                     )
                     + "\n",
@@ -150,6 +154,8 @@ class PipelineTests(unittest.TestCase):
                 mjwarp_ppo_minibatch_size=16_384,
                 mjwarp_ppo_learning_rate=3e-4,
                 mjwarp_elite_frac=0.1,
+                include_negative_rlvr_samples=True,
+                negative_rlvr_margin=1.0,
                 eval_episodes=5,
                 seed=7,
                 device="cuda",
@@ -175,10 +181,10 @@ class PipelineTests(unittest.TestCase):
                 with patch("eureka_lite.pipeline.train_rlvr", return_value={"final_loss": 0.5}):
                     summary = run_full_pipeline(config)
 
-        first_call = run_search_mock.call_args_list[0].kwargs
-        second_call = run_search_mock.call_args_list[1].kwargs
-        self.assertIsNone(first_call["adapter_path"])
-        self.assertEqual(second_call["adapter_path"], (run_root / "iteration_000" / "adapter").as_posix())
+        first_config = run_search_mock.call_args_list[0].args[0]
+        second_config = run_search_mock.call_args_list[1].args[0]
+        self.assertIsNone(first_config.adapter_path)
+        self.assertEqual(second_config.adapter_path, (run_root / "iteration_000" / "adapter").as_posix())
         self.assertEqual(summary["iterations_completed"], 2)
 
     def test_pipeline_exits_before_new_iteration_when_pause_file_exists(self) -> None:
@@ -203,6 +209,8 @@ class PipelineTests(unittest.TestCase):
                 mjwarp_ppo_minibatch_size=16_384,
                 mjwarp_ppo_learning_rate=3e-4,
                 mjwarp_elite_frac=0.1,
+                include_negative_rlvr_samples=True,
+                negative_rlvr_margin=1.0,
                 eval_episodes=5,
                 seed=7,
                 device="cuda",

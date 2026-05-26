@@ -8,14 +8,12 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-import gymnasium as gym
 import numpy as np
-from stable_baselines3 import PPO
-from stable_baselines3.common.env_util import make_vec_env
 
 from .adapters import get_adapter
 from .generators import initial_population, mutate_candidate
 from .hf_generator import HfGeneratorConfig, HfRewardGenerator
+from .io_utils import atomic_write_text, write_jsonl
 from .rewards import RewardCandidate, RewardWrapper
 
 
@@ -29,127 +27,32 @@ class CandidateResult:
     seed: int
     task: str
     verified_reward_type: str = "true_env_return"
+    rlvr_reward: float | None = None
+    rlvr_reward_type: str | None = None
     status: str = "success"
     error: str | None = None
     elapsed_seconds: float | None = None
     metadata: dict[str, Any] | None = None
 
 
-def train_and_evaluate(
-    candidate: RewardCandidate,
-    *,
-    task: str,
-    timesteps: int,
-    eval_episodes: int,
-    n_envs: int,
-    seed: int,
-    device: str,
-    sim_backend: str = "sb3",
-    worlds_per_candidate: int = 4096,
-    mjwarp_evaluator: str = "ppo",
-    mjwarp_episode_steps: int = 500,
-    mjwarp_policy_iterations: int = 4,
-    mjwarp_ppo_horizon: int = 32,
-    mjwarp_ppo_epochs: int = 4,
-    mjwarp_ppo_minibatch_size: int = 16_384,
-    mjwarp_ppo_learning_rate: float = 3.0e-4,
-    mjwarp_elite_frac: float = 0.1,
-) -> CandidateResult:
-    started_at = time.monotonic()
-    adapter = get_adapter(task)
-    if timesteps <= 0:
-        return CandidateResult(
-            candidate=candidate,
-            mean_reward=None,
-            std_reward=None,
-            episode_rewards=[],
-            timesteps=timesteps,
-            seed=seed,
-            task=task,
-            status="generated_only",
-            elapsed_seconds=time.monotonic() - started_at,
-        )
-
-    if sim_backend == "mjwarp":
-        from .mjwarp_evaluator import MjwarpEvaluatorConfig, train_and_evaluate_mjwarp
-
-        warp_device = "cuda:0" if device in {"auto", "cuda"} else device
-        result = train_and_evaluate_mjwarp(
-            candidate,
-            MjwarpEvaluatorConfig(
-                task=task,
-                evaluator=mjwarp_evaluator,
-                worlds_per_candidate=worlds_per_candidate,
-                episode_steps=mjwarp_episode_steps,
-                policy_iterations=mjwarp_policy_iterations,
-                ppo_horizon=mjwarp_ppo_horizon,
-                ppo_epochs=mjwarp_ppo_epochs,
-                ppo_minibatch_size=mjwarp_ppo_minibatch_size,
-                ppo_learning_rate=mjwarp_ppo_learning_rate,
-                elite_frac=mjwarp_elite_frac,
-                seed=seed,
-                device=warp_device,
-                eval_episodes=eval_episodes,
-            ),
-        )
-        return CandidateResult(
-            candidate=candidate,
-            mean_reward=result["mean_reward"],
-            std_reward=result["std_reward"],
-            episode_rewards=result["episode_rewards"],
-            timesteps=int(result["metadata"]["training_world_steps"]),
-            seed=seed,
-            task=task,
-            elapsed_seconds=result["elapsed_seconds"],
-            metadata=result["metadata"],
-        )
-
-    if sim_backend != "sb3":
-        raise ValueError(f"Unsupported simulation backend: {sim_backend}")
-
-    def make_train_env():
-        return RewardWrapper(gym.make(task), candidate.expression, adapter)
-
-    train_env = make_vec_env(make_train_env, n_envs=n_envs, seed=seed)
-    model = PPO(
-        "MlpPolicy",
-        train_env,
-        learning_rate=3e-4,
-        n_steps=512,
-        batch_size=256,
-        n_epochs=6,
-        gamma=0.99,
-        verbose=0,
-        seed=seed,
-        device=device,
-    )
-    model.learn(total_timesteps=timesteps, progress_bar=False)
-    train_env.close()
-
-    episode_rewards: list[float] = []
-    for episode in range(eval_episodes):
-        env = gym.make(task)
-        obs, _info = env.reset(seed=seed + 10_000 + episode)
-        total_reward = 0.0
-        terminated = False
-        truncated = False
-        while not (terminated or truncated):
-            action, _state = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, _info = env.step(action)
-            total_reward += float(reward)
-        env.close()
-        episode_rewards.append(total_reward)
-
-    return CandidateResult(
-        candidate=candidate,
-        mean_reward=float(np.mean(episode_rewards)),
-        std_reward=float(np.std(episode_rewards)),
-        episode_rewards=episode_rewards,
-        timesteps=timesteps,
-        seed=seed,
-        task=task,
-        elapsed_seconds=time.monotonic() - started_at,
-    )
+@dataclass(frozen=True)
+class CandidateEvaluationConfig:
+    task: str
+    timesteps: int
+    eval_episodes: int
+    n_envs: int
+    seed: int
+    device: str
+    sim_backend: str = "sb3"
+    worlds_per_candidate: int = 4096
+    mjwarp_evaluator: str = "ppo"
+    mjwarp_episode_steps: int = 500
+    mjwarp_policy_iterations: int = 4
+    mjwarp_ppo_horizon: int = 32
+    mjwarp_ppo_epochs: int = 4
+    mjwarp_ppo_minibatch_size: int = 16_384
+    mjwarp_ppo_learning_rate: float = 3.0e-4
+    mjwarp_elite_frac: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -180,128 +83,211 @@ class RunConfig:
     mjwarp_ppo_minibatch_size: int = 16_384
     mjwarp_ppo_learning_rate: float = 3.0e-4
     mjwarp_elite_frac: float = 0.1
+    include_negative_rlvr_samples: bool = True
+    negative_rlvr_margin: float = 1.0
+
+    @classmethod
+    def from_dict(cls, row: dict[str, Any]) -> "RunConfig":
+        return cls(
+            task=row["task"],
+            generations=int(row["generations"]),
+            population=int(row["population"]),
+            eureka_elites=int(row.get("eureka_elites", 4)),
+            timesteps=int(row["timesteps"]),
+            eval_episodes=int(row["eval_episodes"]),
+            n_envs=int(row["n_envs"]),
+            seed=int(row["seed"]),
+            device=row["device"],
+            generator=row["generator"],
+            model_id=row["model_id"],
+            adapter_path=row.get("adapter_path"),
+            max_new_tokens=int(row["max_new_tokens"]),
+            temperature=float(row["temperature"]),
+            top_p=float(row["top_p"]),
+            load_in_4bit=bool(row["load_in_4bit"]),
+            sim_backend=row.get("sim_backend", "sb3"),
+            worlds_per_candidate=int(row.get("worlds_per_candidate", 4096)),
+            mjwarp_evaluator=row.get("mjwarp_evaluator", "ppo"),
+            mjwarp_episode_steps=int(row.get("mjwarp_episode_steps", 500)),
+            mjwarp_policy_iterations=int(row.get("mjwarp_policy_iterations", 4)),
+            mjwarp_ppo_horizon=int(row.get("mjwarp_ppo_horizon", 32)),
+            mjwarp_ppo_epochs=int(row.get("mjwarp_ppo_epochs", 4)),
+            mjwarp_ppo_minibatch_size=int(row.get("mjwarp_ppo_minibatch_size", 16_384)),
+            mjwarp_ppo_learning_rate=float(row.get("mjwarp_ppo_learning_rate", 3.0e-4)),
+            mjwarp_elite_frac=float(row.get("mjwarp_elite_frac", 0.1)),
+            include_negative_rlvr_samples=bool(row.get("include_negative_rlvr_samples", True)),
+            negative_rlvr_margin=float(row.get("negative_rlvr_margin", 1.0)),
+        )
+
+    def evaluation_config(self, seed: int) -> CandidateEvaluationConfig:
+        return CandidateEvaluationConfig(
+            task=self.task,
+            timesteps=self.timesteps,
+            eval_episodes=self.eval_episodes,
+            n_envs=self.n_envs,
+            seed=seed,
+            device=self.device,
+            sim_backend=self.sim_backend,
+            worlds_per_candidate=self.worlds_per_candidate,
+            mjwarp_evaluator=self.mjwarp_evaluator,
+            mjwarp_episode_steps=self.mjwarp_episode_steps,
+            mjwarp_policy_iterations=self.mjwarp_policy_iterations,
+            mjwarp_ppo_horizon=self.mjwarp_ppo_horizon,
+            mjwarp_ppo_epochs=self.mjwarp_ppo_epochs,
+            mjwarp_ppo_minibatch_size=self.mjwarp_ppo_minibatch_size,
+            mjwarp_ppo_learning_rate=self.mjwarp_ppo_learning_rate,
+            mjwarp_elite_frac=self.mjwarp_elite_frac,
+        )
+
+
+def train_and_evaluate(
+    candidate: RewardCandidate,
+    config: CandidateEvaluationConfig,
+) -> CandidateResult:
+    started_at = time.monotonic()
+    adapter = get_adapter(config.task)
+    if config.timesteps <= 0:
+        return CandidateResult(
+            candidate=candidate,
+            mean_reward=None,
+            std_reward=None,
+            episode_rewards=[],
+            timesteps=config.timesteps,
+            seed=config.seed,
+            task=config.task,
+            status="generated_only",
+            elapsed_seconds=time.monotonic() - started_at,
+        )
+
+    if config.sim_backend == "mjwarp":
+        from .mjwarp_evaluator import MjwarpEvaluatorConfig, train_and_evaluate_mjwarp
+
+        warp_device = "cuda:0" if config.device in {"auto", "cuda"} else config.device
+        result = train_and_evaluate_mjwarp(
+            candidate,
+            MjwarpEvaluatorConfig(
+                task=config.task,
+                evaluator=config.mjwarp_evaluator,
+                worlds_per_candidate=config.worlds_per_candidate,
+                episode_steps=config.mjwarp_episode_steps,
+                policy_iterations=config.mjwarp_policy_iterations,
+                ppo_horizon=config.mjwarp_ppo_horizon,
+                ppo_epochs=config.mjwarp_ppo_epochs,
+                ppo_minibatch_size=config.mjwarp_ppo_minibatch_size,
+                ppo_learning_rate=config.mjwarp_ppo_learning_rate,
+                elite_frac=config.mjwarp_elite_frac,
+                seed=config.seed,
+                device=warp_device,
+                eval_episodes=config.eval_episodes,
+            ),
+        )
+        return CandidateResult(
+            candidate=candidate,
+            mean_reward=result["mean_reward"],
+            std_reward=result["std_reward"],
+            episode_rewards=result["episode_rewards"],
+            timesteps=int(result["metadata"]["training_world_steps"]),
+            seed=config.seed,
+            task=config.task,
+            elapsed_seconds=result["elapsed_seconds"],
+            metadata=result["metadata"],
+        )
+
+    if config.sim_backend != "sb3":
+        raise ValueError(f"Unsupported simulation backend: {config.sim_backend}")
+
+    import gymnasium as gym
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.env_util import make_vec_env
+
+    def make_train_env():
+        return RewardWrapper(gym.make(config.task), candidate.expression, adapter)
+
+    train_env = make_vec_env(make_train_env, n_envs=config.n_envs, seed=config.seed)
+    model = PPO(
+        "MlpPolicy",
+        train_env,
+        learning_rate=3e-4,
+        n_steps=512,
+        batch_size=256,
+        n_epochs=6,
+        gamma=0.99,
+        verbose=0,
+        seed=config.seed,
+        device=config.device,
+    )
+    model.learn(total_timesteps=config.timesteps, progress_bar=False)
+    train_env.close()
+
+    episode_rewards: list[float] = []
+    for episode in range(config.eval_episodes):
+        env = gym.make(config.task)
+        obs, _info = env.reset(seed=config.seed + 10_000 + episode)
+        total_reward = 0.0
+        terminated = False
+        truncated = False
+        while not (terminated or truncated):
+            action, _state = model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, _info = env.step(action)
+            total_reward += float(reward)
+        env.close()
+        episode_rewards.append(total_reward)
+
+    return CandidateResult(
+        candidate=candidate,
+        mean_reward=float(np.mean(episode_rewards)),
+        std_reward=float(np.std(episode_rewards)),
+        episode_rewards=episode_rewards,
+        timesteps=config.timesteps,
+        seed=config.seed,
+        task=config.task,
+        elapsed_seconds=time.monotonic() - started_at,
+    )
 
 
 def run_search(
+    config: RunConfig,
     *,
-    task: str,
-    generations: int,
-    population: int,
-    timesteps: int,
-    eval_episodes: int,
-    n_envs: int,
-    seed: int,
-    device: str,
     output_dir: Path,
-    eureka_elites: int = 4,
-    generator: str = "mock",
-    model_id: str = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
-    adapter_path: str | None = None,
-    max_new_tokens: int = 256,
-    temperature: float = 0.7,
-    top_p: float = 0.95,
-    load_in_4bit: bool = True,
-    sim_backend: str = "sb3",
-    worlds_per_candidate: int = 4096,
-    mjwarp_evaluator: str = "ppo",
-    mjwarp_episode_steps: int = 500,
-    mjwarp_policy_iterations: int = 4,
-    mjwarp_ppo_horizon: int = 32,
-    mjwarp_ppo_epochs: int = 4,
-    mjwarp_ppo_minibatch_size: int = 16_384,
-    mjwarp_ppo_learning_rate: float = 3.0e-4,
-    mjwarp_elite_frac: float = 0.1,
     pause_path: Path | None = None,
     resume: bool = False,
     overwrite: bool = False,
 ) -> list[CandidateResult]:
     state = load_checkpoint(output_dir) if resume else None
     if state:
-        checkpoint_config = state["config"]
-        task = checkpoint_config["task"]
-        generations = int(checkpoint_config["generations"])
-        population = int(checkpoint_config["population"])
-        eureka_elites = int(checkpoint_config.get("eureka_elites", 4))
-        timesteps = int(checkpoint_config["timesteps"])
-        eval_episodes = int(checkpoint_config["eval_episodes"])
-        n_envs = int(checkpoint_config["n_envs"])
-        seed = int(checkpoint_config["seed"])
-        device = checkpoint_config["device"]
-        generator = checkpoint_config["generator"]
-        model_id = checkpoint_config["model_id"]
-        adapter_path = checkpoint_config.get("adapter_path")
-        max_new_tokens = int(checkpoint_config["max_new_tokens"])
-        temperature = float(checkpoint_config["temperature"])
-        top_p = float(checkpoint_config["top_p"])
-        load_in_4bit = bool(checkpoint_config["load_in_4bit"])
-        sim_backend = checkpoint_config.get("sim_backend", "sb3")
-        worlds_per_candidate = int(checkpoint_config.get("worlds_per_candidate", 4096))
-        mjwarp_evaluator = checkpoint_config.get("mjwarp_evaluator", "ppo")
-        mjwarp_episode_steps = int(checkpoint_config.get("mjwarp_episode_steps", 500))
-        mjwarp_policy_iterations = int(checkpoint_config.get("mjwarp_policy_iterations", 4))
-        mjwarp_ppo_horizon = int(checkpoint_config.get("mjwarp_ppo_horizon", 32))
-        mjwarp_ppo_epochs = int(checkpoint_config.get("mjwarp_ppo_epochs", 4))
-        mjwarp_ppo_minibatch_size = int(checkpoint_config.get("mjwarp_ppo_minibatch_size", 16_384))
-        mjwarp_ppo_learning_rate = float(checkpoint_config.get("mjwarp_ppo_learning_rate", 3.0e-4))
-        mjwarp_elite_frac = float(checkpoint_config.get("mjwarp_elite_frac", 0.1))
+        config = RunConfig.from_dict(state["config"])
 
-    run_config = RunConfig(
-        task=task,
-        generations=generations,
-        population=population,
-        eureka_elites=eureka_elites,
-        timesteps=timesteps,
-        eval_episodes=eval_episodes,
-        n_envs=n_envs,
-        seed=seed,
-        device=device,
-        generator=generator,
-        model_id=model_id,
-        adapter_path=adapter_path,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        load_in_4bit=load_in_4bit,
-        sim_backend=sim_backend,
-        worlds_per_candidate=worlds_per_candidate,
-        mjwarp_evaluator=mjwarp_evaluator,
-        mjwarp_episode_steps=mjwarp_episode_steps,
-        mjwarp_policy_iterations=mjwarp_policy_iterations,
-        mjwarp_ppo_horizon=mjwarp_ppo_horizon,
-        mjwarp_ppo_epochs=mjwarp_ppo_epochs,
-        mjwarp_ppo_minibatch_size=mjwarp_ppo_minibatch_size,
-        mjwarp_ppo_learning_rate=mjwarp_ppo_learning_rate,
-        mjwarp_elite_frac=mjwarp_elite_frac,
-    )
-    rng = random.Random(seed)
-    prepare_output_dir(output_dir, run_config, resume=resume, overwrite=overwrite)
-    get_adapter(task)
+    rng = random.Random(config.seed)
+    prepare_output_dir(output_dir, config, resume=resume, overwrite=overwrite)
+    get_adapter(config.task)
 
     hf_generator = None
-    if generator == "hf":
+    if config.generator == "hf":
         hf_generator = HfRewardGenerator(
             HfGeneratorConfig(
-                model_id=model_id,
-                adapter_path=adapter_path,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                load_in_4bit=load_in_4bit,
+                model_id=config.model_id,
+                adapter_path=config.adapter_path,
+                max_new_tokens=config.max_new_tokens,
+                temperature=config.temperature,
+                top_p=config.top_p,
+                load_in_4bit=config.load_in_4bit,
             )
         )
         candidates = (
             [candidate_from_dict(row) for row in state["next_candidates"]]
             if state and state.get("next_candidates")
-            else hf_generator.generate_population(task=task, population=population, generation=0)
+            else hf_generator.generate_population(task=config.task, population=config.population, generation=0)
         )
-    elif generator == "mock":
+        pending_rejections = [] if state else hf_generator.drain_rejected_candidates()
+    elif config.generator == "mock":
         candidates = (
             [candidate_from_dict(row) for row in state["next_candidates"]]
             if state and state.get("next_candidates")
-            else initial_population(task, population, rng)
+            else initial_population(config.task, config.population, rng)
         )
+        pending_rejections = []
     else:
-        raise ValueError(f"Unsupported generator {generator!r}")
+        raise ValueError(f"Unsupported generator {config.generator!r}")
 
     all_results: list[CandidateResult] = (
         [candidate_result_from_dict(row) for row in state["results"]] if state else []
@@ -309,33 +295,36 @@ def run_search(
     best_expression: str | None = state.get("best_expression") if state else None
     best_score: float | None = state.get("best_score") if state else None
     elite_context: list[dict[str, Any]] = list(state.get("elite_context", [])) if state else []
+    evolution_feedback: str | None = state.get("evolution_feedback") if state else None
     start_generation = int(state.get("next_generation", 0)) if state else 0
     completed_keys = {result_key(result.candidate.generation, result.candidate.name) for result in all_results}
 
-    if start_generation >= generations:
-        log_event(output_dir, "resume_noop", {"next_generation": start_generation, "generations": generations})
-        log_message(output_dir, f"resume noop: next_generation={start_generation} generations={generations}")
+    if start_generation >= config.generations:
+        log_event(output_dir, "resume_noop", {"next_generation": start_generation, "generations": config.generations})
+        log_message(output_dir, f"resume noop: next_generation={start_generation} generations={config.generations}")
         write_results(output_dir, all_results)
         return all_results
 
-    log_event(output_dir, "run_started", {"config": asdict(run_config), "resume": resume})
+    log_event(output_dir, "run_started", {"config": asdict(config), "resume": resume})
     log_message(
         output_dir,
-        f"run started: task={task} generator={generator} generations={generations} "
-        f"population={population} sim_backend={sim_backend}",
+        f"run started: task={config.task} generator={config.generator} generations={config.generations} "
+        f"population={config.population} sim_backend={config.sim_backend}",
     )
-    for generation in range(start_generation, generations):
+    for generation in range(start_generation, config.generations):
         log_event(output_dir, "generation_started", {"generation": generation})
         log_message(output_dir, f"generation {generation} started")
         if generation > 0 and hf_generator is not None and not (state and generation == start_generation):
             candidates = hf_generator.generate_population(
-                task=task,
-                population=population,
+                task=config.task,
+                population=config.population,
                 generation=generation,
                 best_expression=best_expression,
                 best_score=best_score,
                 elites=elite_context,
+                evolution_feedback=evolution_feedback,
             )
+            pending_rejections = hf_generator.drain_rejected_candidates()
         generation_results = []
         for idx, candidate in enumerate(candidates):
             key = result_key(generation, candidate.name)
@@ -349,22 +338,7 @@ def run_search(
             log_message(output_dir, f"generation {generation} candidate {candidate.name} started")
             result = run_candidate_safely(
                 candidate,
-                task=task,
-                timesteps=timesteps,
-                eval_episodes=eval_episodes,
-                n_envs=n_envs,
-                seed=seed + generation * 100 + idx,
-                device=device,
-                sim_backend=sim_backend,
-                worlds_per_candidate=worlds_per_candidate,
-                mjwarp_evaluator=mjwarp_evaluator,
-                mjwarp_episode_steps=mjwarp_episode_steps,
-                mjwarp_policy_iterations=mjwarp_policy_iterations,
-                mjwarp_ppo_horizon=mjwarp_ppo_horizon,
-                mjwarp_ppo_epochs=mjwarp_ppo_epochs,
-                mjwarp_ppo_minibatch_size=mjwarp_ppo_minibatch_size,
-                mjwarp_ppo_learning_rate=mjwarp_ppo_learning_rate,
-                mjwarp_elite_frac=mjwarp_elite_frac,
+                config.evaluation_config(config.seed + generation * 100 + idx),
             )
             generation_results.append(result)
             all_results.append(result)
@@ -389,23 +363,71 @@ def run_search(
             write_results(output_dir, all_results)
             save_checkpoint(
                 output_dir,
-                run_config,
+                config,
                 results=all_results,
                 next_generation=generation,
                 next_candidates=candidates,
                 best_expression=best_expression,
                 best_score=best_score,
                 elite_context=elite_context,
+                evolution_feedback=evolution_feedback,
             )
             if pause_requested(pause_path):
                 log_event(output_dir, "run_paused", {"generation": generation, "candidate": candidate.name})
                 log_message(output_dir, f"run paused after generation {generation} candidate {candidate.name}")
                 return all_results
 
+        if config.include_negative_rlvr_samples:
+            failure_penalty = negative_reward_for_generation(generation_results, config.negative_rlvr_margin)
+            generation_results = assign_failed_evaluation_penalties(generation_results, failure_penalty)
+            all_results = replace_generation_results(all_results, generation_results)
+            rejected_results = rejected_candidates_to_results(
+                pending_rejections,
+                task=config.task,
+                seed=config.seed + generation * 100,
+                penalty=failure_penalty,
+            )
+            for result in rejected_results:
+                all_results.append(result)
+                append_rlvr_record(output_dir, result)
+                log_event(
+                    output_dir,
+                    "candidate_rejected",
+                    {
+                        "generation": generation,
+                        "candidate": result.candidate.name,
+                        "status": result.status,
+                        "rlvr_reward": result.rlvr_reward,
+                        "error": result.error,
+                    },
+                )
+        pending_rejections = []
+        if not generation_results:
+            write_results(output_dir, all_results)
+            save_checkpoint(
+                output_dir,
+                config,
+                results=all_results,
+                next_generation=config.generations,
+                next_candidates=[],
+                best_expression=best_expression,
+                best_score=best_score,
+                elite_context=elite_context,
+                evolution_feedback=evolution_feedback,
+            )
+            log_event(
+                output_dir,
+                "generation_no_executable_candidates",
+                {"generation": generation, "negative_records": len(all_results)},
+            )
+            log_message(output_dir, f"generation {generation} produced no executable reward candidates")
+            return all_results
+
         generation_results.sort(key=result_sort_key, reverse=True)
-        generation_results = annotate_generation_results(generation_results, eureka_elites)
+        generation_results = annotate_generation_results(generation_results, config.eureka_elites)
         all_results = replace_generation_results(all_results, generation_results)
-        elite_context = elite_context_from_results(generation_results, eureka_elites)
+        elite_context = elite_context_from_results(generation_results, config.eureka_elites)
+        evolution_feedback = format_generation_feedback(generation_results, config.eureka_elites)
         best = generation_results[0].candidate
         best_expression = best.expression
         best_score = generation_results[0].mean_reward
@@ -417,16 +439,17 @@ def run_search(
                 "best_candidate": best.name,
                 "best_score": best_score,
                 "elite_context": elite_context,
+                "evolution_feedback": evolution_feedback,
             },
         )
         log_message(output_dir, f"generation {generation} finished: best={best.name} score={best_score}")
         write_results(output_dir, all_results)
 
         if hf_generator is None:
-            parents = [result.candidate for result in generation_results[: max(1, min(eureka_elites, len(generation_results)))]]
+            parents = [result.candidate for result in generation_results[: max(1, min(config.eureka_elites, len(generation_results)))]]
             parent_scores = {result.candidate.name: result.mean_reward for result in generation_results}
             candidates = []
-            for i in range(population):
+            for i in range(config.population):
                 parent = parents[i % len(parents)]
                 child = mutate_candidate(parent, i, generation + 1, rng)
                 candidates.append(
@@ -436,20 +459,21 @@ def run_search(
                         eureka_elite_names=[str(item["name"]) for item in elite_context],
                         eureka_elite_expressions=[str(item["expression"]) for item in elite_context],
                         eureka_elite_scores=[item["score"] for item in elite_context],
-                        eureka_feedback=format_elite_context(elite_context),
+                        eureka_feedback=evolution_feedback,
                     )
                 )
         else:
             candidates = []
         save_checkpoint(
             output_dir,
-            run_config,
+            config,
             results=all_results,
             next_generation=generation + 1,
             next_candidates=candidates,
             best_expression=best_expression,
             best_score=best_score,
             elite_context=elite_context,
+            evolution_feedback=evolution_feedback,
         )
         state = None
         if pause_requested(pause_path):
@@ -465,56 +489,22 @@ def run_search(
 
 def run_candidate_safely(
     candidate: RewardCandidate,
-    *,
-    task: str,
-    timesteps: int,
-    eval_episodes: int,
-    n_envs: int,
-    seed: int,
-    device: str,
-    sim_backend: str = "sb3",
-    worlds_per_candidate: int = 4096,
-    mjwarp_evaluator: str = "ppo",
-    mjwarp_episode_steps: int = 500,
-    mjwarp_policy_iterations: int = 4,
-    mjwarp_ppo_horizon: int = 32,
-    mjwarp_ppo_epochs: int = 4,
-    mjwarp_ppo_minibatch_size: int = 16_384,
-    mjwarp_ppo_learning_rate: float = 3.0e-4,
-    mjwarp_elite_frac: float = 0.1,
+    config: CandidateEvaluationConfig,
 ) -> CandidateResult:
     try:
-        return train_and_evaluate(
-            candidate,
-            task=task,
-            timesteps=timesteps,
-            eval_episodes=eval_episodes,
-            n_envs=n_envs,
-            seed=seed,
-            device=device,
-            sim_backend=sim_backend,
-            worlds_per_candidate=worlds_per_candidate,
-            mjwarp_evaluator=mjwarp_evaluator,
-            mjwarp_episode_steps=mjwarp_episode_steps,
-            mjwarp_policy_iterations=mjwarp_policy_iterations,
-            mjwarp_ppo_horizon=mjwarp_ppo_horizon,
-            mjwarp_ppo_epochs=mjwarp_ppo_epochs,
-            mjwarp_ppo_minibatch_size=mjwarp_ppo_minibatch_size,
-            mjwarp_ppo_learning_rate=mjwarp_ppo_learning_rate,
-            mjwarp_elite_frac=mjwarp_elite_frac,
-        )
+        return train_and_evaluate(candidate, config)
     except Exception as exc:
         return CandidateResult(
             candidate=candidate,
             mean_reward=None,
             std_reward=None,
             episode_rewards=[],
-            timesteps=timesteps,
-            seed=seed,
-            task=task,
+            timesteps=config.timesteps,
+            seed=config.seed,
+            task=config.task,
             status="failed",
             error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-            metadata={"sim_backend": sim_backend},
+            metadata={"sim_backend": config.sim_backend},
         )
 
 
@@ -550,7 +540,7 @@ def to_rlvr_record(result: CandidateResult) -> dict[str, object]:
         "generator_type": candidate.generator_type,
         "generator_checkpoint": candidate.generator_checkpoint,
         "prompt": candidate.prompt,
-        "completion": candidate.expression,
+        "completion": candidate.completion_text or candidate.expression,
         "completion_token_ids": candidate.completion_token_ids,
         "old_logprobs": candidate.old_logprobs,
         "task": result.task,
@@ -564,11 +554,14 @@ def to_rlvr_record(result: CandidateResult) -> dict[str, object]:
         "eureka_elite_expressions": candidate.eureka_elite_expressions,
         "eureka_elite_scores": candidate.eureka_elite_scores,
         "eureka_feedback": candidate.eureka_feedback,
-        "train_reward_expression": candidate.expression,
+        "train_reward_expression": None if result.status == "invalid_completion" else candidate.expression,
+        "reward_components": candidate.component_expressions,
         "verified_reward": result.mean_reward,
         "verified_reward_std": result.std_reward,
         "verified_reward_episodes": result.episode_rewards,
         "verified_reward_type": result.verified_reward_type,
+        "rlvr_reward": result.mean_reward if result.rlvr_reward is None else result.rlvr_reward,
+        "rlvr_reward_type": result.verified_reward_type if result.rlvr_reward_type is None else result.rlvr_reward_type,
         "seed": result.seed,
         "timesteps": result.timesteps,
         "status": result.status,
@@ -617,6 +610,7 @@ def save_checkpoint(
     best_expression: str | None,
     best_score: float | None,
     elite_context: list[dict[str, Any]] | None = None,
+    evolution_feedback: str | None = None,
 ) -> None:
     payload = {
         "config": asdict(config),
@@ -625,6 +619,7 @@ def save_checkpoint(
         "best_expression": best_expression,
         "best_score": best_score,
         "elite_context": elite_context or [],
+        "evolution_feedback": evolution_feedback,
         "results": [candidate_result_to_dict(result) for result in results],
         "updated_at": time.time(),
     }
@@ -636,8 +631,7 @@ def load_checkpoint(output_dir: Path) -> dict[str, Any]:
 
 
 def append_rlvr_record(output_dir: Path, result: CandidateResult) -> None:
-    with (output_dir / "rlvr_records.incremental.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(to_rlvr_record(result), sort_keys=True) + "\n")
+    write_jsonl(output_dir / "rlvr_records.incremental.jsonl", [to_rlvr_record(result)], append=True)
 
 
 def log_event(output_dir: Path, event: str, payload: dict[str, Any]) -> None:
@@ -651,16 +645,6 @@ def log_message(output_dir: Path, message: str) -> None:
     print(line, flush=True)
     with (output_dir / "run.log").open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
-
-
-def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
-    atomic_write_text(path, "\n".join(json.dumps(row, sort_keys=True) for row in rows) + ("\n" if rows else ""))
-
-
-def atomic_write_text(path: Path, text: str) -> None:
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(text, encoding="utf-8")
-    tmp_path.replace(path)
 
 
 def result_key(generation: int, candidate_name: str) -> str:
@@ -683,6 +667,8 @@ def candidate_result_from_dict(row: dict[str, Any]) -> CandidateResult:
         seed=int(row["seed"]),
         task=row["task"],
         verified_reward_type=row.get("verified_reward_type", "true_env_return"),
+        rlvr_reward=row.get("rlvr_reward"),
+        rlvr_reward_type=row.get("rlvr_reward_type"),
         status=row.get("status", "success"),
         error=row.get("error"),
         elapsed_seconds=row.get("elapsed_seconds"),
@@ -698,6 +684,8 @@ def candidate_from_dict(row: dict[str, Any]) -> RewardCandidate:
         prompt=row["prompt"],
         expression=row["expression"],
         weights=dict(row.get("weights", {})),
+        component_expressions=row.get("component_expressions"),
+        completion_text=row.get("completion_text"),
         generation=int(row.get("generation", 0)),
         generator_type=row.get("generator_type", "mock"),
         generator_checkpoint=row.get("generator_checkpoint", "mock-v1"),
@@ -763,15 +751,128 @@ def replace_generation_results(
     ]
 
 
-def format_elite_context(elites: list[dict[str, Any]]) -> str | None:
-    if not elites:
-        return None
-    lines = []
-    for item in elites:
-        score = item.get("score")
-        score_text = "n/a" if score is None else f"{float(score):.4f}"
-        lines.append(
-            f"{item.get('rank')}. name={item.get('name')} true_return={score_text} "
-            f"expression={item.get('expression')}"
+def negative_reward_for_generation(results: list[CandidateResult], margin: float) -> float:
+    if margin <= 0:
+        raise ValueError("--negative-rlvr-margin must be greater than 0")
+    successful_scores = [
+        result.mean_reward
+        for result in results
+        if result.status == "success" and result.mean_reward is not None
+    ]
+    baseline = min(successful_scores) if successful_scores else 0.0
+    return float(baseline) - margin
+
+
+def assign_failed_evaluation_penalties(
+    results: list[CandidateResult], penalty: float
+) -> list[CandidateResult]:
+    return [
+        replace(
+            result,
+            rlvr_reward=penalty,
+            rlvr_reward_type="failed_evaluation_penalty",
         )
+        if result.status == "failed"
+        else result
+        for result in results
+    ]
+
+
+def rejected_candidates_to_results(
+    rejected: list[tuple[RewardCandidate, str]],
+    *,
+    task: str,
+    seed: int,
+    penalty: float,
+) -> list[CandidateResult]:
+    return [
+        CandidateResult(
+            candidate=candidate,
+            mean_reward=None,
+            std_reward=None,
+            episode_rewards=[],
+            timesteps=0,
+            seed=seed + index,
+            task=task,
+            status="invalid_completion",
+            error=error,
+            rlvr_reward=penalty,
+            rlvr_reward_type="invalid_completion_penalty",
+            metadata={"failure_stage": "reward_validation"},
+        )
+        for index, (candidate, error) in enumerate(rejected)
+    ]
+
+
+def format_generation_feedback(results: list[CandidateResult], elite_count: int) -> str:
+    ranked = sorted(results, key=result_sort_key, reverse=True)
+    elites = ranked[:elite_count]
+    rejected = ranked[elite_count:]
+    successful_rewards = [result.mean_reward for result in ranked if result.mean_reward is not None]
+    lines = ["Ranked by verified true environment return."]
+    if successful_rewards:
+        lines.append(
+            "Verified return summary: "
+            f"best={max(successful_rewards):.4f}, "
+            f"mean={float(np.mean(successful_rewards)):.4f}, "
+            f"worst={min(successful_rewards):.4f}."
+        )
+    lines.append("Elite reward programs to improve from:")
+    for rank, result in enumerate(elites, start=1):
+        lines.extend(format_result_feedback_row(rank, result, selected=True))
+    if rejected:
+        lines.append("Lower-ranked reward programs to avoid copying blindly:")
+        for rank, result in enumerate(rejected[: min(4, len(rejected))], start=elite_count + 1):
+            lines.extend(format_result_feedback_row(rank, result, selected=False))
+    failure_count = sum(1 for result in ranked if result.status == "failed")
+    if failure_count:
+        lines.append(f"{failure_count} candidates failed validation or evaluation; avoid their error patterns.")
     return "\n".join(lines)
+
+
+def format_result_feedback_row(rank: int, result: CandidateResult, *, selected: bool) -> list[str]:
+    score = "n/a" if result.mean_reward is None else f"{result.mean_reward:.4f}"
+    prefix = "ELITE" if selected else "NON_ELITE"
+    lines = [
+        f"{rank}. {prefix} name={result.candidate.name} status={result.status} verified_return={score}",
+        f"   expression={result.candidate.expression}",
+    ]
+    metadata = result.metadata or {}
+    best_shaped = metadata.get("best_shaped_return")
+    summaries = metadata.get("iteration_summaries") or []
+    best_internal_true = None
+    if summaries:
+        true_values = [
+            item.get("best_true_return_in_population")
+            for item in summaries
+            if item.get("best_true_return_in_population") is not None
+        ]
+        if true_values:
+            best_internal_true = max(float(value) for value in true_values)
+    diagnostics = []
+    if best_shaped is not None:
+        diagnostics.append(f"best_shaped_return={float(best_shaped):.4f}")
+    if best_internal_true is not None:
+        diagnostics.append(f"best_internal_true_return={best_internal_true:.4f}")
+    if result.error:
+        diagnostics.append(f"error={result.error.splitlines()[0]}")
+    if diagnostics:
+        lines.append("   diagnostics=" + ", ".join(diagnostics))
+    component_stats = latest_component_stats(metadata)
+    if component_stats:
+        parts = []
+        for name, stats in component_stats.items():
+            parts.append(
+                f"{name}:mean={float(stats['mean']):.4f},min={float(stats['min']):.4f},max={float(stats['max']):.4f}"
+            )
+        lines.append("   reward_component_stats=" + "; ".join(parts))
+    return lines
+
+
+def latest_component_stats(metadata: dict[str, Any]) -> dict[str, dict[str, float]]:
+    summaries = metadata.get("iteration_summaries") or []
+    for item in reversed(summaries):
+        stats = item.get("reward_component_stats")
+        if stats:
+            return stats
+    return {}

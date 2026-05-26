@@ -21,6 +21,8 @@ MJWARP_PPO_EPOCHS="${MJWARP_PPO_EPOCHS:-4}"
 MJWARP_PPO_MINIBATCH_SIZE="${MJWARP_PPO_MINIBATCH_SIZE:-16384}"
 MJWARP_PPO_LEARNING_RATE="${MJWARP_PPO_LEARNING_RATE:-3e-4}"
 MJWARP_ELITE_FRAC="${MJWARP_ELITE_FRAC:-0.1}"
+INCLUDE_NEGATIVE_RLVR_SAMPLES="${INCLUDE_NEGATIVE_RLVR_SAMPLES:-1}"
+NEGATIVE_RLVR_MARGIN="${NEGATIVE_RLVR_MARGIN:-1.0}"
 EVAL_EPISODES="${EVAL_EPISODES:-5}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
@@ -28,7 +30,7 @@ TOP_P="${TOP_P:-0.95}"
 RLVR_EPOCHS="${RLVR_EPOCHS:-1}"
 RLVR_BATCH_SIZE="${RLVR_BATCH_SIZE:-1}"
 RLVR_LEARNING_RATE="${RLVR_LEARNING_RATE:-5e-5}"
-RLVR_MAX_LENGTH="${RLVR_MAX_LENGTH:-1024}"
+RLVR_MAX_LENGTH="${RLVR_MAX_LENGTH:-8192}"
 MIN_GPU_MEMORY_MB="${MIN_GPU_MEMORY_MB:-90000}"
 ALLOW_SMALL_GPU="${ALLOW_SMALL_GPU:-0}"
 RUN_SMOKE_TEST="${RUN_SMOKE_TEST:-1}"
@@ -53,6 +55,8 @@ Options:
                               PPO minibatch size.
   --mjwarp-ppo-learning-rate X
                               PPO learning rate.
+  --no-negative-rlvr-samples Do not train the model on invalid/failed reward programs.
+  --negative-rlvr-margin X   Penalty below the worst successful candidate. Default: 1.0.
   --allow-small-gpu           Run even if GPU memory is below the 96 GB default.
   --no-smoke-test             Skip the small MJWarp smoke test.
   --force-train               Retrain adapters even if trainer_metrics.json exists.
@@ -107,6 +111,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --mjwarp-ppo-learning-rate)
       MJWARP_PPO_LEARNING_RATE="$2"
+      shift 2
+      ;;
+    --no-negative-rlvr-samples)
+      INCLUDE_NEGATIVE_RLVR_SAMPLES=0
+      shift
+      ;;
+    --negative-rlvr-margin)
+      NEGATIVE_RLVR_MARGIN="$2"
       shift 2
       ;;
     --allow-small-gpu)
@@ -228,7 +240,6 @@ fi
 
 PIPELINE_ARGS=(
   -m eureka_lite.pipeline
-  --task Ant-v5
   --model-id "$MODEL_ID"
   --run-root "$RUN_ROOT"
   --iterations "$ITERATIONS"
@@ -244,6 +255,7 @@ PIPELINE_ARGS=(
   --mjwarp-ppo-minibatch-size "$MJWARP_PPO_MINIBATCH_SIZE"
   --mjwarp-ppo-learning-rate "$MJWARP_PPO_LEARNING_RATE"
   --mjwarp-elite-frac "$MJWARP_ELITE_FRAC"
+  --negative-rlvr-margin "$NEGATIVE_RLVR_MARGIN"
   --eval-episodes "$EVAL_EPISODES"
   --max-new-tokens "$MAX_NEW_TOKENS"
   --temperature "$TEMPERATURE"
@@ -261,6 +273,9 @@ if [[ "$FORCE_TRAIN" == "1" ]]; then
 fi
 if [[ "$OVERWRITE_COLLECTION" == "1" ]]; then
   PIPELINE_ARGS+=(--overwrite-collection)
+fi
+if [[ "$INCLUDE_NEGATIVE_RLVR_SAMPLES" != "1" ]]; then
+  PIPELINE_ARGS+=(--no-negative-rlvr-samples)
 fi
 
 log "Starting full MJWarp EUREKA/RLVR pipeline"

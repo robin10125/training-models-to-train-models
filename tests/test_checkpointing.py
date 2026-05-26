@@ -12,6 +12,9 @@ from eureka_lite.search import (
     candidate_result_from_dict,
     candidate_result_to_dict,
     prepare_output_dir,
+    assign_failed_evaluation_penalties,
+    negative_reward_for_generation,
+    rejected_candidates_to_results,
     run_search,
     save_checkpoint,
     to_rlvr_record,
@@ -77,10 +80,12 @@ class CheckpointingTests(unittest.TestCase):
                 next_candidates=[],
                 best_expression=candidate.expression,
                 best_score=None,
+                evolution_feedback="reflection",
             )
             payload = json.loads((output_dir / "checkpoint.json").read_text())
             self.assertEqual(payload["next_generation"], 1)
             self.assertEqual(payload["results"][0]["status"], "generated_only")
+            self.assertEqual(payload["evolution_feedback"], "reflection")
 
     def test_rlvr_record_includes_error_and_elapsed_seconds(self) -> None:
         candidate = initial_population("Ant-v5", 1, __import__("random").Random(7))[0]
@@ -101,21 +106,65 @@ class CheckpointingTests(unittest.TestCase):
         self.assertEqual(record["error"], "boom")
         self.assertEqual(record["elapsed_seconds"], 1.0)
 
+    def test_failed_and_invalid_candidates_receive_separate_rlvr_penalties(self) -> None:
+        candidate = initial_population("Ant-v5", 1, __import__("random").Random(7))[0]
+        success = CandidateResult(
+            candidate=candidate,
+            mean_reward=10.0,
+            std_reward=0.0,
+            episode_rewards=[10.0],
+            timesteps=1,
+            seed=7,
+            task="Ant-v5",
+        )
+        failed = CandidateResult(
+            candidate=candidate,
+            mean_reward=None,
+            std_reward=None,
+            episode_rewards=[],
+            timesteps=1,
+            seed=8,
+            task="Ant-v5",
+            status="failed",
+            error="crash",
+        )
+        penalty = negative_reward_for_generation([success, failed], margin=2.0)
+        penalized = assign_failed_evaluation_penalties([failed], penalty)[0]
+        rejected = rejected_candidates_to_results(
+            [(candidate, "ValueError: invalid")],
+            task="Ant-v5",
+            seed=9,
+            penalty=penalty,
+        )[0]
+        self.assertEqual(penalty, 8.0)
+        self.assertEqual(to_rlvr_record(penalized)["verified_reward"], None)
+        self.assertEqual(to_rlvr_record(penalized)["rlvr_reward"], 8.0)
+        self.assertEqual(to_rlvr_record(rejected)["status"], "invalid_completion")
+        self.assertEqual(to_rlvr_record(rejected)["rlvr_reward_type"], "invalid_completion_penalty")
+
     def test_search_records_eureka_lineage_and_rank_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             results = run_search(
-                task="Ant-v5",
-                generations=2,
-                population=3,
-                eureka_elites=2,
-                timesteps=0,
-                eval_episodes=0,
-                n_envs=1,
-                seed=7,
-                device="cpu",
+                RunConfig(
+                    task="Ant-v5",
+                    generations=2,
+                    population=3,
+                    eureka_elites=2,
+                    timesteps=0,
+                    eval_episodes=0,
+                    n_envs=1,
+                    seed=7,
+                    device="cpu",
+                    generator="mock",
+                    model_id="mock",
+                    adapter_path=None,
+                    max_new_tokens=1,
+                    temperature=0.1,
+                    top_p=0.9,
+                    load_in_4bit=False,
+                ),
                 output_dir=output_dir,
-                generator="mock",
             )
             records = [
                 json.loads(line)
@@ -125,6 +174,7 @@ class CheckpointingTests(unittest.TestCase):
         self.assertEqual(len(results), 6)
         self.assertTrue(any(record["eureka_parent_names"] for record in records))
         self.assertTrue(any(record["eureka_elite_names"] for record in records))
+        self.assertTrue(any(record["eureka_feedback"] for record in records))
         self.assertTrue(
             any(
                 record["metadata"] is not None and record["metadata"].get("eureka_selected_elite")
@@ -175,16 +225,25 @@ class CheckpointingTests(unittest.TestCase):
                 best_score=None,
             )
             resumed = run_search(
-                task="CartPole-v1",
-                generations=99,
-                population=99,
-                timesteps=99,
-                eval_episodes=99,
-                n_envs=99,
-                seed=99,
-                device="auto",
+                RunConfig(
+                    task="Unknown-v0",
+                    generations=99,
+                    population=99,
+                    eureka_elites=1,
+                    timesteps=99,
+                    eval_episodes=99,
+                    n_envs=99,
+                    seed=99,
+                    device="auto",
+                    generator="mock",
+                    model_id="mock",
+                    adapter_path=None,
+                    max_new_tokens=1,
+                    temperature=0.1,
+                    top_p=0.9,
+                    load_in_4bit=False,
+                ),
                 output_dir=output_dir,
-                generator="mock",
                 resume=True,
             )
             self.assertEqual(len(resumed), 1)

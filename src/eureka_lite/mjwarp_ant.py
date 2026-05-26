@@ -8,10 +8,11 @@ from typing import Any
 
 import numpy as np
 
+from .adapters import ANT_TASK
+
 
 @dataclass(frozen=True)
 class MjwarpAntConfig:
-    task: str = "Ant-v5"
     worlds: int = 1024
     steps: int = 1000
     warmup_steps: int = 10
@@ -55,7 +56,7 @@ def run_mjwarp_ant(config: MjwarpAntConfig) -> dict[str, Any]:
     wp.init()
     rng = np.random.default_rng(config.seed)
 
-    env = gym.make(config.task)
+    env = gym.make(ANT_TASK)
     try:
         mjm = env.unwrapped.model
         nu = int(mjm.nu)
@@ -117,7 +118,6 @@ def run_mjwarp_ant(config: MjwarpAntConfig) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run batched Ant-v5 physics with MuJoCo Warp.")
-    parser.add_argument("--task", default="Ant-v5", choices=["Ant-v5"])
     parser.add_argument("--worlds", type=int, default=1024)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--warmup-steps", type=int, default=10)
@@ -134,7 +134,6 @@ def main() -> None:
     args = parse_args()
     result = run_mjwarp_ant(
         MjwarpAntConfig(
-            task=args.task,
             worlds=args.worlds,
             steps=args.steps,
             warmup_steps=args.warmup_steps,

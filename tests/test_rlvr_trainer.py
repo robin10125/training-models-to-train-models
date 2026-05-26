@@ -8,6 +8,8 @@ from pathlib import Path
 import torch
 
 from eureka_lite.rlvr_trainer import (
+    RlvrDataset,
+    RlvrTrainingExample,
     align_old_logprobs,
     collate_batch,
     grpo_clipped_loss,
@@ -18,6 +20,28 @@ from eureka_lite.rlvr_trainer import (
 
 
 class RlvrTrainerTests(unittest.TestCase):
+    def test_grpo_dataset_uses_sampled_token_ids_and_rejects_context_truncation(self) -> None:
+        class Tokenizer:
+            eos_token_id = 9
+
+            def __call__(self, text, add_special_tokens=False):
+                del add_special_tokens
+                return type("Result", (), {"input_ids": [1] * len(text)})()
+
+        example = RlvrTrainingExample(
+            prompt="p",
+            completion="decoded-text",
+            reward=1.0,
+            advantage=1.0,
+            source="test",
+            completion_token_ids=[7, 8],
+            old_logprobs=[-0.1, -0.2],
+        )
+        row = RlvrDataset([example], Tokenizer(), max_length=8)[0]
+        self.assertEqual(row["input_ids"], [1, 7, 8, 9])
+        with self.assertRaisesRegex(ValueError, "trainer_max_length"):
+            RlvrDataset([example], Tokenizer(), max_length=2)[0]
+
     def test_load_rlvr_examples_filters_and_normalizes_advantages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "records.jsonl"
@@ -70,6 +94,33 @@ class RlvrTrainerTests(unittest.TestCase):
         self.assertLess(examples[0].advantage, 0)
         self.assertGreater(examples[1].advantage, 0)
         self.assertEqual(examples[0].old_logprobs, [-0.1, -0.2])
+
+    def test_load_grpo_examples_includes_negative_rlvr_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "records.jsonl"
+            base = {
+                "prompt": "same prompt",
+                "prompt_id": "p",
+                "generator_checkpoint": "m",
+                "completion_token_ids": [1, 2],
+                "old_logprobs": [-0.1, -0.2],
+            }
+            rows = [
+                {**base, "status": "success", "verified_reward": 10.0, "completion": "valid"},
+                {
+                    **base,
+                    "status": "invalid_completion",
+                    "verified_reward": None,
+                    "rlvr_reward": 5.0,
+                    "completion": "invalid",
+                },
+            ]
+            path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            examples = load_grpo_examples(path)
+        self.assertEqual(len(examples), 2)
+        by_completion = {example.completion: example for example in examples}
+        self.assertLess(by_completion["invalid"].advantage, 0)
+        self.assertGreater(by_completion["valid"].advantage, 0)
 
     def test_align_old_logprobs_matches_completion_labels(self) -> None:
         labels = [-100, -100, 10, 11]

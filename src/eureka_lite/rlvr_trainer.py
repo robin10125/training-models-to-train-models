@@ -12,6 +12,8 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from .io_utils import atomic_write_text, write_jsonl
+
 
 @dataclass(frozen=True)
 class RlvrTrainingExample:
@@ -58,13 +60,24 @@ class RlvrDataset(Dataset[dict[str, Any]]):
     def __getitem__(self, index: int) -> dict[str, Any]:
         example = self.examples[index]
         prompt_ids = self.tokenizer(example.prompt, add_special_tokens=False).input_ids
-        completion_ids = self.tokenizer(example.completion, add_special_tokens=False).input_ids
-        if self.tokenizer.eos_token_id is not None:
+        completion_ids = (
+            list(example.completion_token_ids)
+            if example.completion_token_ids is not None
+            else self.tokenizer(example.completion, add_special_tokens=False).input_ids
+        )
+        if self.tokenizer.eos_token_id is not None and (
+            not completion_ids or completion_ids[-1] != self.tokenizer.eos_token_id
+        ):
             completion_ids = completion_ids + [self.tokenizer.eos_token_id]
 
         input_ids = prompt_ids + completion_ids
         labels = [-100] * len(prompt_ids) + completion_ids
         if len(input_ids) > self.max_length:
+            if example.old_logprobs is not None:
+                raise ValueError(
+                    "GRPO sample exceeds trainer_max_length; increase --trainer-max-length "
+                    "so old logprobs are compared under the original prompt context."
+                )
             input_ids = input_ids[-self.max_length :]
             labels = labels[-self.max_length :]
 
@@ -84,9 +97,9 @@ def load_rlvr_examples(records_path: Path) -> list[RlvrTrainingExample]:
         if not line.strip():
             continue
         row = json.loads(line)
-        if row.get("status") != "success":
+        if not trainable_rlvr_record(row):
             continue
-        reward = row.get("verified_reward")
+        reward = record_rlvr_reward(row)
         prompt = row.get("prompt")
         completion = row.get("completion")
         if reward is None or prompt is None or completion is None:
@@ -132,9 +145,9 @@ def load_grpo_examples(records_path: Path, *, min_group_size: int = 2) -> list[R
         if not line.strip():
             continue
         row = json.loads(line)
-        if row.get("status") != "success":
+        if not trainable_rlvr_record(row):
             continue
-        if row.get("verified_reward") is None or row.get("prompt") is None or row.get("completion") is None:
+        if record_rlvr_reward(row) is None or row.get("prompt") is None or row.get("completion") is None:
             continue
         if row.get("completion_token_ids") is None or row.get("old_logprobs") is None:
             continue
@@ -146,7 +159,7 @@ def load_grpo_examples(records_path: Path, *, min_group_size: int = 2) -> list[R
     for rows in groups.values():
         if len(rows) < min_group_size:
             continue
-        rewards = [float(row["verified_reward"]) for row in rows]
+        rewards = [float(record_rlvr_reward(row)) for row in rows]
         mean_reward = sum(rewards) / len(rewards)
         variance = sum((reward - mean_reward) ** 2 for reward in rewards) / max(1, len(rewards) - 1)
         std_reward = math.sqrt(variance)
@@ -169,6 +182,20 @@ def load_grpo_examples(records_path: Path, *, min_group_size: int = 2) -> list[R
             f"No GRPO groups with at least {min_group_size} successful records and old logprobs found in {records_path}"
         )
     return examples
+
+
+def record_rlvr_reward(row: dict[str, Any]) -> float | None:
+    reward = row.get("rlvr_reward")
+    if reward is None:
+        reward = row.get("verified_reward")
+    return None if reward is None else float(reward)
+
+
+def trainable_rlvr_record(row: dict[str, Any]) -> bool:
+    status = row.get("status")
+    if status == "success":
+        return True
+    return status in {"failed", "invalid_completion"} and row.get("rlvr_reward") is not None
 
 
 def group_key(row: dict[str, Any]) -> str:
@@ -438,26 +465,13 @@ def pause_requested(pause_path: str | None) -> bool:
     return pause_path is not None and Path(pause_path).exists()
 
 
-def write_jsonl(path: Path, rows: list[dict[str, Any]], *, append: bool = False) -> None:
-    mode = "a" if append else "w"
-    with path.open(mode, encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
-
-
-def atomic_write_text(path: Path, text: str) -> None:
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(text, encoding="utf-8")
-    tmp_path.replace(path)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a LoRA adapter from EUREKA RLVR records.")
     parser.add_argument("--records", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-id", default="Qwen/Qwen2.5-Coder-3B-Instruct")
     parser.add_argument("--adapter-path", default=None)
-    parser.add_argument("--max-length", type=int, default=1024)
+    parser.add_argument("--max-length", type=int, default=8192)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=5e-5)

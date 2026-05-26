@@ -7,9 +7,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .adapters import ANT_TASK
+from .cli_options import add_eureka_options, add_generation_options, add_mjwarp_options, add_negative_sample_options
 from .hf_generator import DEFAULT_HF_MODEL_ID
 from .rlvr_trainer import RlvrTrainerConfig, train_rlvr
-from .search import run_search
+from .search import RunConfig, run_search
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,8 @@ class FullPipelineConfig:
     mjwarp_ppo_minibatch_size: int
     mjwarp_ppo_learning_rate: float
     mjwarp_elite_frac: float
+    include_negative_rlvr_samples: bool
+    negative_rlvr_margin: float
     eval_episodes: int
     seed: int
     device: str
@@ -70,33 +74,8 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
         adapter_dir = run_root / f"iteration_{iteration:03d}" / "adapter"
         collection_resume = (collection_dir / "checkpoint.json").exists() and not config.overwrite_collection
         results = run_search(
-            task=config.task,
-            generations=config.generations,
-            population=config.population,
-            timesteps=1,
-            eval_episodes=config.eval_episodes,
-            n_envs=1,
-            seed=config.seed + iteration * 10_000,
-            device=config.device,
+            collection_config(config, iteration, adapter_path),
             output_dir=collection_dir,
-            eureka_elites=config.eureka_elites,
-            generator="hf",
-            model_id=config.model_id,
-            adapter_path=adapter_path,
-            max_new_tokens=config.max_new_tokens,
-            temperature=config.temperature,
-            top_p=config.top_p,
-            load_in_4bit=config.load_in_4bit,
-            sim_backend="mjwarp",
-            worlds_per_candidate=config.worlds_per_candidate,
-            mjwarp_evaluator=config.mjwarp_evaluator,
-            mjwarp_episode_steps=config.mjwarp_episode_steps,
-            mjwarp_policy_iterations=config.mjwarp_policy_iterations,
-            mjwarp_ppo_horizon=config.mjwarp_ppo_horizon,
-            mjwarp_ppo_epochs=config.mjwarp_ppo_epochs,
-            mjwarp_ppo_minibatch_size=config.mjwarp_ppo_minibatch_size,
-            mjwarp_ppo_learning_rate=config.mjwarp_ppo_learning_rate,
-            mjwarp_elite_frac=config.mjwarp_elite_frac,
             pause_path=pause_path,
             resume=collection_resume,
             overwrite=config.overwrite_collection,
@@ -133,28 +112,7 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
             trainer_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
             trainer_status = "skipped_existing_adapter"
         else:
-            trainer_metrics = train_rlvr(
-                RlvrTrainerConfig(
-                    records_path=str(records_path),
-                    output_dir=str(adapter_dir),
-                    model_id=config.model_id,
-                    adapter_path=adapter_path,
-                    max_length=config.trainer_max_length,
-                    epochs=config.trainer_epochs,
-                    batch_size=config.trainer_batch_size,
-                    learning_rate=config.trainer_learning_rate,
-                    max_grad_norm=config.trainer_max_grad_norm,
-                    lora_r=config.trainer_lora_r,
-                    lora_alpha=config.trainer_lora_alpha,
-                    lora_dropout=config.trainer_lora_dropout,
-                    load_in_4bit=config.load_in_4bit,
-                    algorithm=config.trainer_algorithm,
-                    clip_epsilon=config.trainer_clip_epsilon,
-                    beta_kl=config.trainer_beta_kl,
-                    resume=True,
-                    pause_path=pause_path.as_posix(),
-                )
-            )
+            trainer_metrics = train_rlvr(trainer_config(config, records_path, adapter_dir, adapter_path, pause_path))
             trainer_status = trainer_metrics.get("status", "trained")
 
         iteration_summaries.append(
@@ -181,6 +139,68 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
     summary = build_pipeline_summary(config, iteration_summaries, started_at, status="completed")
     pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
+
+
+def collection_config(config: FullPipelineConfig, iteration: int, adapter_path: str | None) -> RunConfig:
+    return RunConfig(
+        task=config.task,
+        generations=config.generations,
+        population=config.population,
+        timesteps=1,
+        eval_episodes=config.eval_episodes,
+        n_envs=1,
+        seed=config.seed + iteration * 10_000,
+        device=config.device,
+        eureka_elites=config.eureka_elites,
+        generator="hf",
+        model_id=config.model_id,
+        adapter_path=adapter_path,
+        max_new_tokens=config.max_new_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        load_in_4bit=config.load_in_4bit,
+        sim_backend="mjwarp",
+        worlds_per_candidate=config.worlds_per_candidate,
+        mjwarp_evaluator=config.mjwarp_evaluator,
+        mjwarp_episode_steps=config.mjwarp_episode_steps,
+        mjwarp_policy_iterations=config.mjwarp_policy_iterations,
+        mjwarp_ppo_horizon=config.mjwarp_ppo_horizon,
+        mjwarp_ppo_epochs=config.mjwarp_ppo_epochs,
+        mjwarp_ppo_minibatch_size=config.mjwarp_ppo_minibatch_size,
+        mjwarp_ppo_learning_rate=config.mjwarp_ppo_learning_rate,
+        mjwarp_elite_frac=config.mjwarp_elite_frac,
+        include_negative_rlvr_samples=config.include_negative_rlvr_samples,
+        negative_rlvr_margin=config.negative_rlvr_margin,
+    )
+
+
+def trainer_config(
+    config: FullPipelineConfig,
+    records_path: Path,
+    adapter_dir: Path,
+    adapter_path: str | None,
+    pause_path: Path,
+) -> RlvrTrainerConfig:
+    return RlvrTrainerConfig(
+        records_path=str(records_path),
+        output_dir=str(adapter_dir),
+        model_id=config.model_id,
+        adapter_path=adapter_path,
+        max_length=config.trainer_max_length,
+        epochs=config.trainer_epochs,
+        batch_size=config.trainer_batch_size,
+        learning_rate=config.trainer_learning_rate,
+        max_grad_norm=config.trainer_max_grad_norm,
+        lora_r=config.trainer_lora_r,
+        lora_alpha=config.trainer_lora_alpha,
+        lora_dropout=config.trainer_lora_dropout,
+        load_in_4bit=config.load_in_4bit,
+        algorithm=config.trainer_algorithm,
+        clip_epsilon=config.trainer_clip_epsilon,
+        beta_kl=config.trainer_beta_kl,
+        resume=True,
+        pause_path=pause_path.as_posix(),
+    )
 
 
 def build_pipeline_summary(
@@ -238,34 +258,21 @@ def iteration_summary(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the full MJWarp EUREKA collection + RLVR training pipeline.")
-    parser.add_argument("--task", default="Ant-v5", choices=["Ant-v5"])
     parser.add_argument("--model-id", default=DEFAULT_HF_MODEL_ID)
     parser.add_argument("--run-root", type=Path, default=Path("runs/deepseek_lite_ant_mjwarp_rlvr"))
     parser.add_argument("--iterations", type=int, default=3)
-    parser.add_argument("--population", type=int, default=16)
-    parser.add_argument("--generations", type=int, default=3)
-    parser.add_argument("--eureka-elites", type=int, default=4)
-    parser.add_argument("--worlds-per-candidate", type=int, default=4096)
-    parser.add_argument("--mjwarp-evaluator", choices=["ppo", "search"], default="ppo")
-    parser.add_argument("--mjwarp-episode-steps", type=int, default=500)
-    parser.add_argument("--mjwarp-policy-iterations", type=int, default=4)
-    parser.add_argument("--mjwarp-ppo-horizon", type=int, default=32)
-    parser.add_argument("--mjwarp-ppo-epochs", type=int, default=4)
-    parser.add_argument("--mjwarp-ppo-minibatch-size", type=int, default=16_384)
-    parser.add_argument("--mjwarp-ppo-learning-rate", type=float, default=3e-4)
-    parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)
+    add_eureka_options(parser, population_default=16)
+    add_mjwarp_options(parser)
+    add_negative_sample_options(parser)
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda", choices=["auto", "cpu", "cuda"])
-    parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--no-4bit", action="store_true")
+    add_generation_options(parser)
     parser.add_argument("--trainer-algorithm", choices=["weighted_sft", "grpo"], default="grpo")
     parser.add_argument("--trainer-epochs", type=int, default=1)
     parser.add_argument("--trainer-batch-size", type=int, default=1)
     parser.add_argument("--trainer-learning-rate", type=float, default=5e-5)
-    parser.add_argument("--trainer-max-length", type=int, default=1024)
+    parser.add_argument("--trainer-max-length", type=int, default=8192)
     parser.add_argument("--trainer-max-grad-norm", type=float, default=1.0)
     parser.add_argument("--trainer-lora-r", type=int, default=16)
     parser.add_argument("--trainer-lora-alpha", type=int, default=32)
@@ -285,8 +292,10 @@ def main() -> None:
         raise SystemExit("--trainer-algorithm grpo requires --population at least 2")
     if args.eureka_elites < 1:
         raise SystemExit("--eureka-elites must be at least 1")
+    if args.negative_rlvr_margin <= 0:
+        raise SystemExit("--negative-rlvr-margin must be greater than 0")
     config = FullPipelineConfig(
-        task=args.task,
+        task=ANT_TASK,
         model_id=args.model_id,
         run_root=args.run_root.as_posix(),
         iterations=args.iterations,
@@ -302,6 +311,8 @@ def main() -> None:
         mjwarp_ppo_minibatch_size=args.mjwarp_ppo_minibatch_size,
         mjwarp_ppo_learning_rate=args.mjwarp_ppo_learning_rate,
         mjwarp_elite_frac=args.mjwarp_elite_frac,
+        include_negative_rlvr_samples=not args.no_negative_rlvr_samples,
+        negative_rlvr_margin=args.negative_rlvr_margin,
         eval_episodes=args.eval_episodes,
         seed=args.seed,
         device=args.device,

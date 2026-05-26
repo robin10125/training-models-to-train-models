@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "eureka-lite"
 version = "0.1.0"
-description = "Small EUREKA-inspired reward search for lightweight Gymnasium tasks."
+description = "EUREKA-inspired RLVR reward search for Gymnasium Ant-v5."
 requires-python = ">=3.10"
 dependencies = [
     "gymnasium[mujoco]>=1.0,<1.1",
