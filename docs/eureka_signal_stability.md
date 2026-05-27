@@ -99,8 +99,9 @@ The script defaults relevant to signal quality are:
 | Policy iterations per candidate | `96` |
 | Control transitions per candidate | `196,608,000` |
 | GPU candidate batch | `16 * 4096 = 65536` worlds |
-| Verified evaluator | Gym `Ant-v5` |
+| Verified evaluator | Batched MJWarp target-domain return |
 
-The verified Gym return remains the scalar success signal assigned to each
-generated reward completion. The generated shaped reward is used to train its
-Ant policy, but is not itself the RLVR score.
+The verified MJWarp Ant return is the scalar success signal assigned to each
+generated reward completion. Candidate ranking stability must be established
+within MJWarp using common seeds and repeated trials. Gym verification is an
+optional diagnostic for transfer beyond the target simulator domain.

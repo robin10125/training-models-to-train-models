@@ -16,10 +16,22 @@ from eureka_lite.rlvr_trainer import (
     load_grpo_examples,
     load_rlvr_examples,
     weighted_completion_loss,
+    prune_old_trainer_checkpoints,
 )
 
 
 class RlvrTrainerTests(unittest.TestCase):
+    def test_prune_old_trainer_checkpoints_keeps_latest_resume_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for epoch in (1, 2, 3):
+                path = root / "checkpoints" / f"epoch_{epoch:04d}"
+                path.mkdir(parents=True)
+                (path / "trainer_state.json").write_text("{}", encoding="utf-8")
+            prune_old_trainer_checkpoints(root, keep_epoch=3)
+            self.assertFalse((root / "checkpoints" / "epoch_0001").exists())
+            self.assertFalse((root / "checkpoints" / "epoch_0002").exists())
+            self.assertTrue((root / "checkpoints" / "epoch_0003" / "trainer_state.json").exists())
     def test_grpo_dataset_uses_sampled_token_ids_and_rejects_context_truncation(self) -> None:
         class Tokenizer:
             eos_token_id = 9

@@ -109,7 +109,7 @@ def _candidate(
     prompt = (
         f"Design a dense reward expression for {task}. "
         "The expression will train a PPO policy, and the candidate will be scored "
-        "only by true environment return during evaluation."
+        "only by verified target-environment return during evaluation."
     )
     return RewardCandidate(
         name=name,

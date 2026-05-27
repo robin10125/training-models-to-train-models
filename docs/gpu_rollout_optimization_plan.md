@@ -15,11 +15,11 @@ Implemented:
 - generation-level candidate-batched PPO evaluation with independent policy
   parameters and `4096` worlds per candidate;
 - best-effort CUDA graph replay for repeated Ant physics substeps;
-- host rollout and Gym verification reference paths.
+- host rollout and Gym transfer-reference paths.
 
 Still to be completed through measurement rather than assumed:
 
-- full Gym-versus-MJWarp verified-return equivalence characterization;
+- MJWarp rank-stability characterization and optional Gym transfer reporting;
 - target 96 GB GPU world-count scaling;
 - full target-GPU throughput measurement of the `16 * 4096` candidate batch.
 
@@ -27,7 +27,7 @@ Still to be completed through measurement rather than assumed:
 
 The intended experiment evaluates many code-model reward proposals by training
 one Ant policy for each proposal in MuJoCo Warp, then assigning verified
-`Ant-v5` return to the corresponding model completion. On a 96 GB GPU, the
+MJWarp Ant return to the corresponding model completion. On a 96 GB GPU, the
 useful scaling target is not simply fitting more worlds in memory. The Ant PPO
 evaluator must keep rollout work on CUDA long enough for the GPU to execute it
 efficiently.
@@ -96,7 +96,8 @@ The refactor must preserve the scientific contract of the experiment:
 
 - Each reward-code candidate trains an independent PPO actor-critic policy.
 - Generated reward components affect policy training only.
-- Verified reward remains the original `Ant-v5` evaluation return.
+- Verified reward remains the original Ant reward evaluated in the MJWarp
+  target environment.
 - Component-level shaped-reward statistics remain available for EUREKA
   feedback and audit records.
 - Failed candidate programs and invalid generated code continue to produce
@@ -182,8 +183,8 @@ Evaluation must:
   `--eval-episodes`;
 - record per-episode return, mean, and standard deviation in the same result
   structure;
-- include a validation test against Gym `Ant-v5` on a small fixed-seed sample
-  before replacing Gym as the default verifier.
+- optionally report transfer against Gym `Ant-v5` on a fixed-seed sample;
+- validate rank stability within MJWarp before a long RLVR run.
 
 ## Work Plan
 
@@ -242,7 +243,7 @@ Implement a batched MJWarp verifier for trained policies:
 - deterministic policy rollout;
 - original Ant return only;
 - result-compatible per-episode metrics;
-- cross-check against Gym verification for seeded small runs.
+- optionally cross-check against Gym for seeded transfer-reporting runs.
 
 Deliverable: an selectable verifier initially, then default it after
 equivalence is established.
@@ -339,7 +340,7 @@ On the target 96 GB GPU:
 | --- | --- | --- |
 | Torch/Warp interop creates implicit synchronizations | GPU utilization remains low despite code changes | Profile each phase and test transfer-free step loops directly. |
 | GPU reward translation accepts different expressions than current validation | Experiment semantics change | Keep the current AST validator as the source of allowed syntax and add equivalence tests. |
-| MJWarp verified returns differ from Gym returns | RLVR reward is no longer comparable | Run both verifiers on seeded policies until validated, and retain a fallback flag. |
+| MJWarp verified returns differ from Gym returns | Transfer to the Gym reference is uncertain | Report Gym diagnostics separately; use MJWarp rank stability for target-domain RLVR quality. |
 | Larger world batches improve throughput but weaken PPO training dynamics | Fast results become scientifically poor | Track verified-return learning curves and variance during scaling tests. |
 | Concurrent candidate scheduling competes with model generation or training memory | Out-of-memory or unstable pipeline behavior | Profile Ant evaluation separately and coordinate GPU residency with RLVR model phases before enabling workers. |
 

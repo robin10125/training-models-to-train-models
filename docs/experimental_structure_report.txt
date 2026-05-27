@@ -12,7 +12,8 @@ reinforcement-learning problem for the language model. A sampled reward function
 is a model completion. The quality of that completion is not judged by whether
 it looks plausible to a human or matches a reference answer. It is judged by
 what happens when the reward function is actually used to train a policy. If the
-generated reward causes an Ant policy to achieve higher true environment return,
+generated reward causes an Ant policy to achieve higher verified return in the
+MJWarp target environment,
 then the completion receives a better verified score. That verified score is
 then used to update the reward-code model.
 
@@ -23,18 +24,20 @@ of the generated reward. In other words, the model is not trained to imitate
 known reward functions. It is trained from the consequences of the reward
 functions it writes.
 
-The default task is Gymnasium's `Ant-v5`. Ant is a useful starting point because
+The target task uses the Ant model and reward structure instantiated through
+MuJoCo Warp. Ant is a useful starting point because
 reward design matters, but the environment is still small enough for repeated
 experimentation. It has meaningful locomotion dynamics, control costs, stability
 constraints, and failure modes. These make it a better test of reward design
 than a trivial control task, while remaining far cheaper than a large robotics
 benchmark.
 
-The project uses true environment return as the verified reward signal. This is
+The project uses the original Ant reward calculated in MJWarp as the verified
+reward signal. This is
 an important distinction. The generated reward expression is used only to train
 or search for an Ant policy. It is not used as the final score for the language
 model. After a candidate reward has induced a policy, that policy is evaluated
-with the original `Ant-v5` reward. The original environment return becomes the
+with the original Ant reward in MJWarp. The target-domain environment return becomes the
 scalar reward assigned to the model completion that generated the candidate
 reward expression.
 

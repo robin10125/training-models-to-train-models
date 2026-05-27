@@ -15,6 +15,7 @@ EUREKA_ELITES="${EUREKA_ELITES:-4}"
 WORLDS_PER_CANDIDATE="${WORLDS_PER_CANDIDATE:-4096}"
 MJWARP_EVALUATOR="${MJWARP_EVALUATOR:-ppo}"
 MJWARP_EPISODE_STEPS="${MJWARP_EPISODE_STEPS:-500}"
+MJWARP_TRAINING_EPISODE_HORIZON="${MJWARP_TRAINING_EPISODE_HORIZON:-1000}"
 MJWARP_POLICY_ITERATIONS="${MJWARP_POLICY_ITERATIONS:-96}"
 MJWARP_PPO_HORIZON="${MJWARP_PPO_HORIZON:-32}"
 MJWARP_PPO_EPOCHS="${MJWARP_PPO_EPOCHS:-4}"
@@ -22,8 +23,11 @@ MJWARP_PPO_MINIBATCH_SIZE="${MJWARP_PPO_MINIBATCH_SIZE:-16384}"
 MJWARP_PPO_LEARNING_RATE="${MJWARP_PPO_LEARNING_RATE:-3e-4}"
 MJWARP_ELITE_FRAC="${MJWARP_ELITE_FRAC:-0.1}"
 MJWARP_ROLLOUT_MODE="${MJWARP_ROLLOUT_MODE:-gpu}"
-MJWARP_VERIFIED_EVALUATOR="${MJWARP_VERIFIED_EVALUATOR:-gym}"
+MJWARP_VERIFIED_EVALUATOR="${MJWARP_VERIFIED_EVALUATOR:-mjwarp}"
 MJWARP_VERIFICATION_STEPS="${MJWARP_VERIFICATION_STEPS:-1000}"
+MJWARP_VERIFIED_AUDIT_GYM="${MJWARP_VERIFIED_AUDIT_GYM:-0}"
+MJWARP_VERIFIED_AUDIT_MAX_ABS_DIFF="${MJWARP_VERIFIED_AUDIT_MAX_ABS_DIFF:-}"
+MJWARP_REWARD_BACKEND="${MJWARP_REWARD_BACKEND:-eager}"
 MJWARP_BATCH_CANDIDATES="${MJWARP_BATCH_CANDIDATES:-1}"
 MJWARP_CUDA_GRAPH="${MJWARP_CUDA_GRAPH:-1}"
 INCLUDE_NEGATIVE_RLVR_SAMPLES="${INCLUDE_NEGATIVE_RLVR_SAMPLES:-1}"
@@ -41,6 +45,7 @@ ALLOW_SMALL_GPU="${ALLOW_SMALL_GPU:-0}"
 RUN_SMOKE_TEST="${RUN_SMOKE_TEST:-1}"
 FORCE_TRAIN="${FORCE_TRAIN:-0}"
 OVERWRITE_COLLECTION="${OVERWRITE_COLLECTION:-0}"
+CHECKPOINT_RETENTION="${CHECKPOINT_RETENTION:-all}"
 
 usage() {
   cat <<'EOF'
@@ -55,6 +60,8 @@ Options:
   --worlds-per-candidate N    Ant worlds per reward candidate.
   --mjwarp-evaluator NAME     Evaluator: ppo or search. Default: ppo.
   --mjwarp-episode-steps N    PPO control steps per policy iteration. Default: 500.
+  --mjwarp-training-episode-horizon N
+                              Max steps before a training world resets. Default: 1000.
   --mjwarp-policy-iterations N
                               Policy iterations per candidate. Default: 96.
   --mjwarp-ppo-horizon N      PPO rollout horizon before each update.
@@ -65,9 +72,14 @@ Options:
                               PPO learning rate.
   --mjwarp-rollout-mode NAME  gpu or host. Default: gpu.
   --mjwarp-verified-evaluator NAME
-                              mjwarp or gym. Default: gym.
+                              mjwarp or gym. Default: mjwarp.
   --mjwarp-verification-steps N
                               Verified rollout horizon. Default: 1000.
+  --mjwarp-verified-audit-gym Compare MJWarp verified returns to Gym Ant-v5.
+  --mjwarp-verified-audit-max-abs-diff X
+                              Fail the audit above this per-episode difference.
+  --mjwarp-reward-backend NAME
+                              eager or compiled. Default: eager.
   --no-mjwarp-candidate-batching
                               Evaluate candidates sequentially instead of in one GPU batch.
   --no-mjwarp-cuda-graph     Disable physics CUDA-graph replay.
@@ -77,6 +89,7 @@ Options:
   --no-smoke-test             Skip the small MJWarp smoke test.
   --force-train               Retrain adapters even if trainer_metrics.json exists.
   --overwrite-collection      Replace existing collection artifacts.
+  --checkpoint-retention NAME all or latest RLVR epoch checkpoints. Default: all.
   -h, --help                  Show this help.
 
 Environment variables with the same uppercase names are still supported as defaults.
@@ -121,6 +134,10 @@ while [[ $# -gt 0 ]]; do
       MJWARP_POLICY_ITERATIONS="$2"
       shift 2
       ;;
+    --mjwarp-training-episode-horizon)
+      MJWARP_TRAINING_EPISODE_HORIZON="$2"
+      shift 2
+      ;;
     --mjwarp-ppo-horizon)
       MJWARP_PPO_HORIZON="$2"
       shift 2
@@ -147,6 +164,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --mjwarp-verification-steps)
       MJWARP_VERIFICATION_STEPS="$2"
+      shift 2
+      ;;
+    --mjwarp-verified-audit-gym)
+      MJWARP_VERIFIED_AUDIT_GYM=1
+      shift
+      ;;
+    --mjwarp-verified-audit-max-abs-diff)
+      MJWARP_VERIFIED_AUDIT_MAX_ABS_DIFF="$2"
+      shift 2
+      ;;
+    --mjwarp-reward-backend)
+      MJWARP_REWARD_BACKEND="$2"
       shift 2
       ;;
     --no-mjwarp-candidate-batching)
@@ -180,6 +209,10 @@ while [[ $# -gt 0 ]]; do
     --overwrite-collection)
       OVERWRITE_COLLECTION=1
       shift
+      ;;
+    --checkpoint-retention)
+      CHECKPOINT_RETENTION="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -293,6 +326,7 @@ PIPELINE_ARGS=(
   --worlds-per-candidate "$WORLDS_PER_CANDIDATE"
   --mjwarp-evaluator "$MJWARP_EVALUATOR"
   --mjwarp-episode-steps "$MJWARP_EPISODE_STEPS"
+  --mjwarp-training-episode-horizon "$MJWARP_TRAINING_EPISODE_HORIZON"
   --mjwarp-policy-iterations "$MJWARP_POLICY_ITERATIONS"
   --mjwarp-ppo-horizon "$MJWARP_PPO_HORIZON"
   --mjwarp-ppo-epochs "$MJWARP_PPO_EPOCHS"
@@ -302,6 +336,7 @@ PIPELINE_ARGS=(
   --mjwarp-rollout-mode "$MJWARP_ROLLOUT_MODE"
   --mjwarp-verified-evaluator "$MJWARP_VERIFIED_EVALUATOR"
   --mjwarp-verification-steps "$MJWARP_VERIFICATION_STEPS"
+  --mjwarp-reward-backend "$MJWARP_REWARD_BACKEND"
   --negative-rlvr-margin "$NEGATIVE_RLVR_MARGIN"
   --eval-episodes "$EVAL_EPISODES"
   --max-new-tokens "$MAX_NEW_TOKENS"
@@ -313,6 +348,7 @@ PIPELINE_ARGS=(
   --trainer-batch-size "$RLVR_BATCH_SIZE"
   --trainer-learning-rate "$RLVR_LEARNING_RATE"
   --trainer-max-length "$RLVR_MAX_LENGTH"
+  --checkpoint-retention "$CHECKPOINT_RETENTION"
 )
 
 if [[ "$FORCE_TRAIN" == "1" ]]; then
@@ -329,6 +365,12 @@ if [[ "$MJWARP_BATCH_CANDIDATES" != "1" ]]; then
 fi
 if [[ "$MJWARP_CUDA_GRAPH" != "1" ]]; then
   PIPELINE_ARGS+=(--no-mjwarp-cuda-graph)
+fi
+if [[ "$MJWARP_VERIFIED_AUDIT_GYM" == "1" ]]; then
+  PIPELINE_ARGS+=(--mjwarp-verified-audit-gym)
+fi
+if [[ -n "$MJWARP_VERIFIED_AUDIT_MAX_ABS_DIFF" ]]; then
+  PIPELINE_ARGS+=(--mjwarp-verified-audit-max-abs-diff "$MJWARP_VERIFIED_AUDIT_MAX_ABS_DIFF")
 fi
 
 log "Starting full MJWarp EUREKA/RLVR pipeline"

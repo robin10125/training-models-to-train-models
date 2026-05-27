@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -46,6 +47,7 @@ class RlvrTrainerConfig:
     beta_kl: float
     resume: bool = True
     pause_path: str | None = None
+    checkpoint_retention: str = "all"
 
 
 class RlvrDataset(Dataset[dict[str, Any]]):
@@ -303,6 +305,8 @@ def train_rlvr(config: RlvrTrainerConfig) -> dict[str, Any]:
         raise RuntimeError("RLVR training requires transformers, peft, accelerate, and bitsandbytes.") from exc
 
     output_dir = Path(config.output_dir)
+    if config.checkpoint_retention not in {"all", "latest"}:
+        raise ValueError("checkpoint_retention must be one of: all, latest")
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = latest_trainer_checkpoint(output_dir) if config.resume else None
     start_epoch = 0
@@ -399,6 +403,8 @@ def train_rlvr(config: RlvrTrainerConfig) -> dict[str, Any]:
             losses.append(float(loss.detach().cpu()))
         write_jsonl(output_dir / "trainer_events.jsonl", [{"epoch": epoch, "loss": losses[-1]}], append=True)
         save_trainer_checkpoint(output_dir, model, tokenizer, config, epoch + 1, losses)
+        if config.checkpoint_retention == "latest":
+            prune_old_trainer_checkpoints(output_dir, keep_epoch=epoch + 1)
         if pause_requested(config.pause_path):
             return trainer_metrics(config, examples, losses, status="paused")
 
@@ -461,6 +467,14 @@ def latest_trainer_checkpoint(output_dir: Path) -> Path | None:
     return max(checkpoints, key=lambda path: int(path.name.rsplit("_", 1)[-1]))
 
 
+def prune_old_trainer_checkpoints(output_dir: Path, *, keep_epoch: int) -> None:
+    checkpoint_root = output_dir / "checkpoints"
+    keep_path = checkpoint_root / f"epoch_{keep_epoch:04d}"
+    for path in checkpoint_root.glob("epoch_*"):
+        if path.is_dir() and path != keep_path:
+            shutil.rmtree(path)
+
+
 def pause_requested(pause_path: str | None) -> bool:
     return pause_path is not None and Path(pause_path).exists()
 
@@ -485,6 +499,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta-kl", type=float, default=0.01)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--pause-path", default=None)
+    parser.add_argument("--checkpoint-retention", choices=["all", "latest"], default="all")
     return parser.parse_args()
 
 
@@ -509,6 +524,7 @@ def main() -> None:
         beta_kl=args.beta_kl,
         resume=not args.no_resume,
         pause_path=args.pause_path,
+        checkpoint_retention=args.checkpoint_retention,
     )
     metrics = train_rlvr(config)
     print(json.dumps({"output_dir": args.output_dir.as_posix(), "final_loss": metrics["final_loss"]}, indent=2))

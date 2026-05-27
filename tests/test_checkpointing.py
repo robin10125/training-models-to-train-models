@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from eureka_lite.generators import initial_population
 from eureka_lite.search import (
@@ -20,10 +22,15 @@ from eureka_lite.search import (
     run_search,
     save_checkpoint,
     to_rlvr_record,
+    verified_reward_type_for_evaluator,
 )
 
 
 class CheckpointingTests(unittest.TestCase):
+    def test_verified_reward_type_names_target_and_transfer_domains(self) -> None:
+        self.assertEqual(verified_reward_type_for_evaluator("mjwarp"), "mjwarp_ant_return")
+        self.assertEqual(verified_reward_type_for_evaluator("gym"), "gym_ant_v5_return")
+
     def test_gpu_mjwarp_ppo_candidates_are_batched_by_default(self) -> None:
         candidates = initial_population("Ant-v5", 2, __import__("random").Random(7))
         config = CandidateEvaluationConfig(
@@ -266,6 +273,120 @@ class CheckpointingTests(unittest.TestCase):
             )
             self.assertEqual(len(resumed), 1)
             self.assertEqual(resumed[0].task, "Ant-v5")
+
+    def test_hf_resume_after_generation_boundary_generates_next_generation(self) -> None:
+        generations_requested: list[int] = []
+
+        class FakeGenerator:
+            def __init__(self, _config) -> None:
+                self._rejections = []
+
+            def generate_population(self, *, task, population, generation, **_kwargs):
+                generations_requested.append(generation)
+                base = initial_population(task, population, __import__("random").Random(7))
+                return [
+                    replace(candidate, name=f"hf_g{generation}_{index}", generation=generation, generator_type="hf")
+                    for index, candidate in enumerate(base)
+                ]
+
+            def drain_rejected_candidates(self):
+                return self._rejections
+
+        config = RunConfig(
+            task="Ant-v5",
+            generations=2,
+            population=1,
+            eureka_elites=1,
+            timesteps=0,
+            eval_episodes=0,
+            n_envs=1,
+            seed=7,
+            device="cpu",
+            generator="hf",
+            model_id="mock",
+            adapter_path=None,
+            max_new_tokens=1,
+            temperature=0.1,
+            top_p=0.9,
+            load_in_4bit=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            with patch("eureka_lite.search.HfRewardGenerator", FakeGenerator):
+                with patch("eureka_lite.search.pause_requested", side_effect=[False, True]):
+                    run_search(config, output_dir=output_dir, pause_path=output_dir / "PAUSE")
+                results = run_search(config, output_dir=output_dir, resume=True)
+
+        self.assertEqual(generations_requested, [0, 1])
+        self.assertEqual({result.candidate.generation for result in results}, {0, 1})
+
+    def test_batched_evaluation_publishes_results_once_after_finalization(self) -> None:
+        config = RunConfig(
+            task="Ant-v5",
+            generations=1,
+            population=2,
+            eureka_elites=1,
+            timesteps=1,
+            eval_episodes=1,
+            n_envs=1,
+            seed=7,
+            device="cuda",
+            generator="mock",
+            model_id="mock",
+            adapter_path=None,
+            max_new_tokens=1,
+            temperature=0.1,
+            top_p=0.9,
+            load_in_4bit=False,
+            sim_backend="mjwarp",
+        )
+
+        def fake_evaluate(candidates, evaluation_config):
+            return [
+                CandidateResult(
+                    candidate=candidate,
+                    mean_reward=float(index),
+                    std_reward=0.0,
+                    episode_rewards=[float(index)],
+                    timesteps=1,
+                    seed=evaluation_config.seed,
+                    task=evaluation_config.task,
+                )
+                for index, candidate in enumerate(candidates)
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("eureka_lite.search.run_candidates_safely", side_effect=fake_evaluate):
+                with patch("eureka_lite.search.write_results") as write_results_mock:
+                    run_search(config, output_dir=Path(tmp))
+        write_results_mock.assert_called_once()
+
+    def test_paused_partial_generation_does_not_publish_unfinalized_rlvr_records(self) -> None:
+        config = RunConfig(
+            task="Ant-v5",
+            generations=1,
+            population=2,
+            eureka_elites=1,
+            timesteps=0,
+            eval_episodes=0,
+            n_envs=1,
+            seed=7,
+            device="cpu",
+            generator="mock",
+            model_id="mock",
+            adapter_path=None,
+            max_new_tokens=1,
+            temperature=0.1,
+            top_p=0.9,
+            load_in_4bit=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            with patch("eureka_lite.search.pause_requested", return_value=True):
+                run_search(config, output_dir=output_dir, pause_path=output_dir / "PAUSE")
+            checkpoint = json.loads((output_dir / "checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(checkpoint["search_state"]["generation"]["raw_results"]), 1)
+            self.assertFalse((output_dir / "rlvr_records.jsonl").exists())
 
 
 if __name__ == "__main__":

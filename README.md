@@ -10,7 +10,8 @@ The loop is:
    elites, and feed task context plus evolutionary feedback into the next
    refinement prompt.
 3. Use each reward candidate to train an Ant PPO policy in MuJoCo Warp.
-4. Evaluate the resulting policies with the true `Ant-v5` environment return.
+4. Evaluate the resulting policies with the original Ant task reward in the
+   MJWarp target environment.
 5. Store structured reward components, prompt, completion tokens, old logprobs,
    EUREKA lineage, elite context, reflection feedback, and verified return as
    RLVR data.
@@ -32,6 +33,11 @@ The paired-seed and policy-budget settings used for stable RLVR rewards are
 documented in [docs/eureka_signal_stability.md](docs/eureka_signal_stability.md).
 The generation-level GPU candidate batching change is documented in
 [docs/candidate_batched_gpu_evaluation_change.md](docs/candidate_batched_gpu_evaluation_change.md).
+The episode-reset, verification-audit, calibration, and retention controls are
+documented in
+[docs/gpu_pipeline_safeguards_2026-05-27.md](docs/gpu_pipeline_safeguards_2026-05-27.md).
+The search-state, resume, and canonical RLVR publication refactor is documented
+in [docs/search_refactor_2026-05-27.md](docs/search_refactor_2026-05-27.md).
 
 ## Setup
 
@@ -79,12 +85,28 @@ the same EUREKA generation use a common policy/evaluation seed for paired
 ranking. The default MJWarp evaluator is
 `ppo`; the older lightweight evaluator remains available with
 `--mjwarp-evaluator search`.
-PPO rollouts use the GPU-resident Torch/MuJoCo Warp path by default. Verified
-reward is still evaluated through Gym's original `Ant-v5` return by default;
-the batched MJWarp verifier is available for measured validation runs.
+PPO rollouts and verified reward evaluation use the GPU-resident MuJoCo Warp
+Ant environment by default. This is the target domain for the experiment:
+RLVR trains the code model to produce reward programs that yield strong Ant
+policies in MJWarp. Gym `Ant-v5` evaluation is an optional transfer diagnostic,
+not the objective being optimized.
 The GPU PPO path batches the `16` candidate policies into one simulator job
 (`65536` total worlds) while retaining `4096` worlds and one independent policy
-per candidate. MuJoCo physics substeps use CUDA graph replay by default.
+per candidate. Completed Ant worlds reset immediately in place while preserving
+the PPO transition terminal flag; `--mjwarp-training-episode-horizon 1000`
+keeps training episodes aligned with the Ant time limit independently of the
+`500`-step PPO collection iteration. MuJoCo physics substeps use CUDA graph
+replay by default.
+
+To measure transfer to the Gym reference implementation, run an optional audit:
+
+```bash
+./scripts/run_full_mjwarp_rlvr_96gb.sh \
+  --run-root runs/audit_96gb_mjwarp_rlvr \
+  --iterations 1 \
+  --mjwarp-policy-iterations 4 \
+  --mjwarp-verified-audit-gym
+```
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20
@@ -95,14 +117,17 @@ The serious run defaults can be changed with `--generations`, `--eureka-elites`,
 Use `--no-mjwarp-candidate-batching` or `--no-mjwarp-cuda-graph` for
 sequential/capture-disabled ablations.
 
-Use the device verifier only when intentionally validating its agreement with
-the Gym reference:
+Calibrate how much Ant policy training is needed before changing the serious
+run budget. This evaluates fixed reward candidates and does not update the code
+model:
 
 ```bash
-./scripts/run_full_mjwarp_rlvr_96gb.sh \
-  --iterations 3 \
-  --mjwarp-verified-evaluator mjwarp \
-  --mjwarp-verification-steps 1000
+.venv/bin/python -m eureka_lite.calibrate_mjwarp \
+  --population 16 \
+  --worlds-per-candidate 4096 \
+  --budgets 4 24 48 96 \
+  --seeds 7 17 27 \
+  --mjwarp-verified-audit-gym
 ```
 
 To exclude invalid code and failed evaluations from model updates for an
@@ -110,6 +135,13 @@ ablation run:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20 --no-negative-rlvr-samples
+```
+
+For multi-epoch trainer runs with bounded resume storage, retain only the most
+recent complete RLVR checkpoint:
+
+```bash
+./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20 --checkpoint-retention latest
 ```
 
 Outputs are written under:

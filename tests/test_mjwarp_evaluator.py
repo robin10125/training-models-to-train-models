@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -11,10 +12,15 @@ from eureka_lite.mjwarp_evaluator import (
     TorchRewardProgram,
     VectorizedRewardExpression,
     VectorizedRewardProgram,
+    _materialize_metric_log,
+    _materialize_metric_log_batched,
     advance_control_step,
     compute_gae,
     compute_gae_torch,
+    build_verification_audit,
+    make_torch_reward_program,
     mjwarp_control_step,
+    reset_mjwarp_worlds,
     seed_torch_policy_rng,
     train_and_evaluate_mjwarp,
 )
@@ -93,6 +99,54 @@ class MjwarpEvaluatorTests(unittest.TestCase):
         torch_total = torch_program.total_from_components(torch_program.components(torch_values)).numpy()
         self.assertTrue(np.allclose(torch_total, numpy_total))
 
+    def test_compiled_reward_backend_preserves_eager_semantics(self) -> None:
+        import torch
+
+        values = {
+            "x_velocity": torch.tensor([1.0, 2.0]),
+            "survive_reward": torch.tensor([1.0, 1.0]),
+        }
+        with patch("torch.compile", side_effect=lambda function, **_kwargs: function):
+            program = make_torch_reward_program(
+                component_expressions={"score": "x_velocity + survive_reward"},
+                expression="",
+                allowed_names=AntAdapter().reward_variables,
+                backend="compiled",
+            )
+        total = program.total_from_components(program.components(values))
+        self.assertTrue(torch.equal(total, torch.tensor([2.0, 3.0])))
+
+    def test_verification_audit_records_difference_and_enforces_threshold(self) -> None:
+        config = MjwarpEvaluatorConfig(verified_audit_gym=True, verified_audit_max_abs_diff=0.2)
+        audit = build_verification_audit([1.0, 2.0], [1.1, 1.9], config)
+        self.assertTrue(audit["passed"])
+        self.assertAlmostEqual(audit["max_abs_diff"], 0.1)
+        with self.assertRaisesRegex(RuntimeError, "audit failed"):
+            build_verification_audit([1.0], [2.0], config)
+
+    def test_gpu_metric_materialization_exposes_best_internal_true_return(self) -> None:
+        import torch
+
+        row = {
+            "iteration": 0,
+            "ppo_update": 0,
+            "mean_shaped_t": torch.tensor(1.0),
+            "max_shaped_t": torch.tensor(2.0),
+            "mean_true_t": torch.tensor(3.0),
+            "best_true_t": torch.tensor(4.0),
+            "component_snapshot": {},
+        }
+        batched_row = {
+            **row,
+            "mean_shaped_t": torch.tensor([1.0, 1.5]),
+            "max_shaped_t": torch.tensor([2.0, 2.5]),
+            "mean_true_t": torch.tensor([3.0, 3.5]),
+            "best_true_t": torch.tensor([4.0, 4.5]),
+            "component_snapshots": [{}, {}],
+        }
+        self.assertEqual(_materialize_metric_log([row])[0]["best_true_return_in_population"], 4.0)
+        self.assertEqual(_materialize_metric_log_batched([batched_row], 2)[1][0]["best_true_return_in_population"], 4.5)
+
     def test_torch_gae_matches_numpy_gae(self) -> None:
         import torch
 
@@ -150,6 +204,32 @@ class MjwarpEvaluatorTests(unittest.TestCase):
         wp = FakeWarp()
         advance_control_step(model=None, data=None, mjw=FakeMjwarp(), wp=wp, frame_skip=5, graph="g")
         self.assertEqual(wp.graphs, ["g"])
+
+    def test_reset_mjwarp_worlds_passes_flat_device_mask(self) -> None:
+        import torch
+
+        class FakeWarp:
+            bool = bool
+
+            def __init__(self) -> None:
+                self.mask = None
+
+            def from_torch(self, mask, dtype=None):
+                self.mask = (mask, dtype)
+                return "warp-mask"
+
+        class FakeMjwarp:
+            def __init__(self) -> None:
+                self.reset = None
+
+            def reset_data(self, model, data, reset=None) -> None:
+                self.reset = (model, data, reset)
+
+        wp = FakeWarp()
+        mjw = FakeMjwarp()
+        reset_mjwarp_worlds("m", "d", torch.tensor([[True, False], [False, True]]), mjw=mjw, wp=wp)
+        self.assertEqual(wp.mask[0].tolist(), [True, False, False, True])
+        self.assertEqual(mjw.reset, ("m", "d", "warp-mask"))
 
     def test_batched_policy_starts_candidates_from_identical_parameters(self) -> None:
         import torch

@@ -59,6 +59,11 @@ class FullPipelineConfig:
     trainer_beta_kl: float
     overwrite_collection: bool
     force_train: bool
+    mjwarp_training_episode_horizon: int = 1000
+    mjwarp_verified_audit_gym: bool = False
+    mjwarp_verified_audit_max_abs_diff: float | None = None
+    mjwarp_reward_backend: str = "eager"
+    checkpoint_retention: str = "all"
 
 
 def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
@@ -78,6 +83,8 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
         collection_dir = run_root / f"iteration_{iteration:03d}" / "collection"
         adapter_dir = run_root / f"iteration_{iteration:03d}" / "adapter"
         collection_resume = (collection_dir / "checkpoint.json").exists() and not config.overwrite_collection
+        collection_started = time.monotonic()
+        collection_memory_before = cuda_memory_snapshot(config.device)
         results = run_search(
             collection_config(config, iteration, adapter_path),
             output_dir=collection_dir,
@@ -85,11 +92,10 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
             resume=collection_resume,
             overwrite=config.overwrite_collection,
         )
+        collection_seconds = time.monotonic() - collection_started
+        collection_memory_after = cuda_memory_snapshot(config.device)
 
         records_path = collection_dir / "rlvr_records.jsonl"
-        if not records_path.exists() or records_path.stat().st_size == 0:
-            raise FileNotFoundError(f"Collection did not produce RLVR records at {records_path}")
-
         best_verified_reward = max(
             (result.mean_reward for result in results if result.mean_reward is not None),
             default=None,
@@ -106,19 +112,31 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
                     best_verified_reward=best_verified_reward,
                     trainer_status="not_started_pause_requested",
                     trainer_final_loss=None,
+                    collection_seconds=collection_seconds,
+                    training_seconds=None,
+                    collection_memory_before=collection_memory_before,
+                    collection_memory_after=collection_memory_after,
+                    training_memory_before=None,
+                    training_memory_after=None,
                 )
             )
             summary = build_pipeline_summary(config, iteration_summaries, started_at, status="paused")
             pipeline_state_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
             return summary
+        if not records_path.exists() or records_path.stat().st_size == 0:
+            raise FileNotFoundError(f"Collection did not produce RLVR records at {records_path}")
 
         metrics_path = adapter_dir / "trainer_metrics.json"
+        training_started = time.monotonic()
+        training_memory_before = cuda_memory_snapshot(config.device)
         if metrics_path.exists() and not config.force_train:
             trainer_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
             trainer_status = "skipped_existing_adapter"
         else:
             trainer_metrics = train_rlvr(trainer_config(config, records_path, adapter_dir, adapter_path, pause_path))
             trainer_status = trainer_metrics.get("status", "trained")
+        training_seconds = time.monotonic() - training_started
+        training_memory_after = cuda_memory_snapshot(config.device)
 
         iteration_summaries.append(
             iteration_summary(
@@ -131,6 +149,12 @@ def run_full_pipeline(config: FullPipelineConfig) -> dict[str, Any]:
                 best_verified_reward=best_verified_reward,
                 trainer_status=trainer_status,
                 trainer_final_loss=trainer_metrics.get("final_loss"),
+                collection_seconds=collection_seconds,
+                training_seconds=training_seconds,
+                collection_memory_before=collection_memory_before,
+                collection_memory_after=collection_memory_after,
+                training_memory_before=training_memory_before,
+                training_memory_after=training_memory_after,
             )
         )
         if trainer_status == "paused":
@@ -168,6 +192,7 @@ def collection_config(config: FullPipelineConfig, iteration: int, adapter_path: 
         worlds_per_candidate=config.worlds_per_candidate,
         mjwarp_evaluator=config.mjwarp_evaluator,
         mjwarp_episode_steps=config.mjwarp_episode_steps,
+        mjwarp_training_episode_horizon=config.mjwarp_training_episode_horizon,
         mjwarp_policy_iterations=config.mjwarp_policy_iterations,
         mjwarp_ppo_horizon=config.mjwarp_ppo_horizon,
         mjwarp_ppo_epochs=config.mjwarp_ppo_epochs,
@@ -177,6 +202,9 @@ def collection_config(config: FullPipelineConfig, iteration: int, adapter_path: 
         mjwarp_rollout_mode=config.mjwarp_rollout_mode,
         mjwarp_verified_evaluator=config.mjwarp_verified_evaluator,
         mjwarp_verification_steps=config.mjwarp_verification_steps,
+        mjwarp_verified_audit_gym=config.mjwarp_verified_audit_gym,
+        mjwarp_verified_audit_max_abs_diff=config.mjwarp_verified_audit_max_abs_diff,
+        mjwarp_reward_backend=config.mjwarp_reward_backend,
         mjwarp_batch_candidates=config.mjwarp_batch_candidates,
         mjwarp_cuda_graph=config.mjwarp_cuda_graph,
         include_negative_rlvr_samples=config.include_negative_rlvr_samples,
@@ -210,6 +238,7 @@ def trainer_config(
         beta_kl=config.trainer_beta_kl,
         resume=True,
         pause_path=pause_path.as_posix(),
+        checkpoint_retention=config.checkpoint_retention,
     )
 
 
@@ -252,6 +281,12 @@ def iteration_summary(
     best_verified_reward: float | None,
     trainer_status: str,
     trainer_final_loss: float | None,
+    collection_seconds: float | None = None,
+    training_seconds: float | None = None,
+    collection_memory_before: dict[str, Any] | None = None,
+    collection_memory_after: dict[str, Any] | None = None,
+    training_memory_before: dict[str, Any] | None = None,
+    training_memory_after: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "iteration": iteration,
@@ -263,7 +298,33 @@ def iteration_summary(
         "best_verified_reward": best_verified_reward,
         "trainer_status": trainer_status,
         "trainer_final_loss": trainer_final_loss,
+        "phase_telemetry": {
+            "collection_seconds": collection_seconds,
+            "training_seconds": training_seconds,
+            "collection_memory_before": collection_memory_before,
+            "collection_memory_after": collection_memory_after,
+            "training_memory_before": training_memory_before,
+            "training_memory_after": training_memory_after,
+        },
     }
+
+
+def cuda_memory_snapshot(device: str) -> dict[str, Any] | None:
+    if device not in {"cuda", "auto"} and not device.startswith("cuda"):
+        return None
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        target = torch.device("cuda:0" if device in {"cuda", "auto"} else device)
+        return {
+            "allocated_bytes": int(torch.cuda.memory_allocated(target)),
+            "reserved_bytes": int(torch.cuda.memory_reserved(target)),
+            "max_allocated_bytes": int(torch.cuda.max_memory_allocated(target)),
+        }
+    except Exception:
+        return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -291,6 +352,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trainer-beta-kl", type=float, default=0.01)
     parser.add_argument("--overwrite-collection", action="store_true")
     parser.add_argument("--force-train", action="store_true")
+    parser.add_argument(
+        "--checkpoint-retention",
+        choices=["all", "latest"],
+        default="all",
+        help="Retain all RLVR epoch checkpoints or only the newest resumable checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -315,6 +382,7 @@ def main() -> None:
         worlds_per_candidate=args.worlds_per_candidate,
         mjwarp_evaluator=args.mjwarp_evaluator,
         mjwarp_episode_steps=args.mjwarp_episode_steps,
+        mjwarp_training_episode_horizon=args.mjwarp_training_episode_horizon,
         mjwarp_policy_iterations=args.mjwarp_policy_iterations,
         mjwarp_ppo_horizon=args.mjwarp_ppo_horizon,
         mjwarp_ppo_epochs=args.mjwarp_ppo_epochs,
@@ -324,6 +392,9 @@ def main() -> None:
         mjwarp_rollout_mode=args.mjwarp_rollout_mode,
         mjwarp_verified_evaluator=args.mjwarp_verified_evaluator,
         mjwarp_verification_steps=args.mjwarp_verification_steps,
+        mjwarp_verified_audit_gym=args.mjwarp_verified_audit_gym,
+        mjwarp_verified_audit_max_abs_diff=args.mjwarp_verified_audit_max_abs_diff,
+        mjwarp_reward_backend=args.mjwarp_reward_backend,
         mjwarp_batch_candidates=not args.no_mjwarp_candidate_batching,
         mjwarp_cuda_graph=not args.no_mjwarp_cuda_graph,
         include_negative_rlvr_samples=not args.no_negative_rlvr_samples,
@@ -348,6 +419,7 @@ def main() -> None:
         trainer_beta_kl=args.trainer_beta_kl,
         overwrite_collection=args.overwrite_collection,
         force_train=args.force_train,
+        checkpoint_retention=args.checkpoint_retention,
     )
     summary = run_full_pipeline(config)
     print(json.dumps(summary, indent=2))

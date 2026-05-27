@@ -240,7 +240,7 @@ def build_reward_prompt(
         )
     elif elites:
         feedback = (
-            "\nEUREKA elite archive from the previous generation, ranked by true Ant-v5 return:\n"
+            "\nEUREKA elite archive from the previous generation, ranked by verified target-environment return:\n"
             f"{format_eureka_feedback(elites)}\n"
             "Use these as evidence. Preserve useful locomotion incentives, remove likely distractors, "
             "and produce one new reward expression that could outperform the ranked elites.\n"
@@ -249,7 +249,7 @@ def build_reward_prompt(
         feedback = (
             "\nCurrent best reward expression:\n"
             f"{best_expression}\n"
-            f"Current best true environment return: {best_score:.4f}\n"
+            f"Current best verified target-environment return: {best_score:.4f}\n"
             "Try to improve it while keeping the expression simple.\n"
         )
     retry = ""
@@ -269,7 +269,7 @@ def build_reward_prompt(
         "The expression will be parsed with Python ast and may only use numeric operators, conditionals, "
         "comparisons, abs, min, max, sqrt, sin, cos, tanh, exp, and these variables:\n"
         f"{', '.join(reward_variables)}\n"
-        "The component expressions will be summed to train PPO. They will be scored only by true environment return, not by their own value.\n"
+        "The component expressions will be summed to train PPO. They will be scored only by verified target-environment return, not by their own value.\n"
         "Prefer forward progress, stable healthy locomotion, low lateral drift, and modest control cost.\n"
         f"{feedback}"
         f"{retry}"
@@ -289,7 +289,7 @@ def task_prompt_context(task: str) -> str:
         "- `action_l2` is squared action magnitude. `control_cost` is the environment action penalty, approximately 0.005 * action_l2.\n"
         "- `survive_reward` is 1.0 while healthy. `healthy` is false when the ant falls or becomes invalid.\n"
         "- `original_reward = forward_reward + survive_reward - control_cost` is used only for final verification.\n"
-        "- Your generated expression trains the policy, but model reward is assigned from the final true environment return.\n"
+        "- Your generated expression trains the policy, but model reward is assigned from the final verified target-environment return.\n"
         "- Avoid rewarding large sideways velocity, falling, excessive action, or gaming `original_reward` without locomotion.\n"
         f"{source_context()}"
     )

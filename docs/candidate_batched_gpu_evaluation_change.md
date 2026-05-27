@@ -56,9 +56,10 @@ ordinary MuJoCo Warp stepping instead of failing a candidate evaluation.
 
 ## Verification and Pausing
 
-Gym `Ant-v5` remains the default verified-return evaluator. Candidate batching
-changes training throughput; it does not change the source of the scalar
-verified reward given to RLVR.
+The batched MJWarp verified-return evaluator is the default because MJWarp Ant
+is the experiment's target domain. Gym `Ant-v5` can be evaluated with
+`--mjwarp-verified-audit-gym` as an optional transfer diagnostic; differences
+between the two domains do not replace or invalidate the MJWarp RLVR signal.
 
 When candidate batching is enabled, a pause request is observed after the
 currently running candidate batch has completed and its individual records

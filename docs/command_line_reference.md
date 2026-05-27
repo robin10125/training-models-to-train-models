@@ -27,7 +27,8 @@ python -m eureka_lite.pipeline [options]
 | --- | --- | --- |
 | `--worlds-per-candidate` | `4096` | Parallel Ant worlds trained for each reward program. |
 | `--mjwarp-evaluator` | `ppo` | Policy optimizer: `ppo` or legacy `search`. |
-| `--mjwarp-episode-steps` | `500` | World horizon for policy training. |
+| `--mjwarp-episode-steps` | `500` | PPO control transitions collected per policy iteration. |
+| `--mjwarp-training-episode-horizon` | `1000` | Maximum training episode length; terminal or timed-out worlds reset in place. |
 | `--mjwarp-policy-iterations` | `96` | Policy training iterations; serious default yields `196,608,000` control transitions per candidate with `4096` worlds and `500` steps. |
 | `--mjwarp-ppo-horizon` | `32` | PPO rollout horizon before an update. |
 | `--mjwarp-ppo-epochs` | `4` | PPO optimization epochs per rollout batch. |
@@ -35,8 +36,11 @@ python -m eureka_lite.pipeline [options]
 | `--mjwarp-ppo-learning-rate` | `3e-4` | PPO learning rate. |
 | `--mjwarp-elite-frac` | `0.1` | Elite fraction used only by legacy `search`. |
 | `--mjwarp-rollout-mode` | `gpu` | PPO rollout implementation: GPU-resident `gpu` or NumPy reference `host`. |
-| `--mjwarp-verified-evaluator` | `gym` | Verified return implementation: reference `gym` or batched `mjwarp`. |
+| `--mjwarp-verified-evaluator` | `mjwarp` | RLVR verified-return domain: target `mjwarp` or transfer-reference `gym`. |
 | `--mjwarp-verification-steps` | `1000` | Episode horizon used by batched MJWarp verification. |
+| `--mjwarp-verified-audit-gym` | off | Also evaluate MJWarp-scored policies through Gym `Ant-v5` and store transfer diagnostics. |
+| `--mjwarp-verified-audit-max-abs-diff` | none | Optionally fail if a Gym transfer audit exceeds this per-episode difference. |
+| `--mjwarp-reward-backend` | `eager` | Generated reward execution path: reference `eager` or optional `compiled` with eager fallback. |
 | `--no-mjwarp-candidate-batching` | off | Disable default generation-level GPU PPO batching; evaluate candidate policies sequentially. |
 | `--no-mjwarp-cuda-graph` | off | Disable default CUDA graph replay for repeated MuJoCo physics substeps. |
 | `--eval-episodes` | `5` | Evaluation episodes used for verified return. |
@@ -69,6 +73,7 @@ python -m eureka_lite.pipeline [options]
 | `--trainer-beta-kl` | `0.01` | GRPO KL coefficient. |
 | `--overwrite-collection` | off | Replace collection output rather than resume it. |
 | `--force-train` | off | Re-run adapter training even if metrics exist. |
+| `--checkpoint-retention` | `all` | RLVR trainer checkpoint retention: `all` or `latest`. |
 
 ## Bootstrap Script
 
@@ -92,14 +97,18 @@ Supported script options:
 | `--worlds-per-candidate N` | Parallel Ant worlds for each candidate. |
 | `--mjwarp-evaluator NAME` | `ppo` or `search`. |
 | `--mjwarp-episode-steps N` | Ant control steps per policy iteration; default `500`. |
+| `--mjwarp-training-episode-horizon N` | Maximum training episode length before an in-place reset; default `1000`. |
 | `--mjwarp-policy-iterations N` | Policy iterations per candidate; default `96`. |
 | `--mjwarp-ppo-horizon N` | PPO rollout horizon. |
 | `--mjwarp-ppo-epochs N` | PPO update epochs. |
 | `--mjwarp-ppo-minibatch-size N` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate X` | PPO learning rate. |
 | `--mjwarp-rollout-mode NAME` | `gpu` or `host`; defaults to GPU-resident PPO. |
-| `--mjwarp-verified-evaluator NAME` | `gym` or `mjwarp`; defaults to reference Gym verification. |
+| `--mjwarp-verified-evaluator NAME` | `mjwarp` or `gym`; defaults to the MJWarp target domain. |
 | `--mjwarp-verification-steps N` | Horizon for MJWarp verification. |
+| `--mjwarp-verified-audit-gym` | Record transfer diagnostics against Gym `Ant-v5`. |
+| `--mjwarp-verified-audit-max-abs-diff X` | Fail an audit whose maximum per-episode difference exceeds `X`. |
+| `--mjwarp-reward-backend NAME` | `eager` or `compiled`; compiled mode falls back on execution failure. |
 | `--no-mjwarp-candidate-batching` | Disable generation-level GPU PPO candidate batching. |
 | `--no-mjwarp-cuda-graph` | Disable physics CUDA graph replay. |
 | `--no-negative-rlvr-samples` | Disable invalid/failed model-update examples. |
@@ -108,11 +117,35 @@ Supported script options:
 | `--no-smoke-test` | Skip the MuJoCo Warp startup check. |
 | `--force-train` | Re-run adapter training. |
 | `--overwrite-collection` | Replace prior collection data. |
+| `--checkpoint-retention NAME` | `all` or `latest` trainer epoch checkpoints. |
 
 The same script defaults can be set using uppercase environment variables,
 including `ITERATIONS`, `POPULATION`, `GENERATIONS`, `EUREKA_ELITES`,
 `WORLDS_PER_CANDIDATE`, `MJWARP_BATCH_CANDIDATES`, `MJWARP_CUDA_GRAPH`,
-`INCLUDE_NEGATIVE_RLVR_SAMPLES`, and `NEGATIVE_RLVR_MARGIN`.
+`INCLUDE_NEGATIVE_RLVR_SAMPLES`, `NEGATIVE_RLVR_MARGIN`,
+`MJWARP_TRAINING_EPISODE_HORIZON`, `MJWARP_VERIFIED_AUDIT_GYM`,
+`MJWARP_REWARD_BACKEND`, and `CHECKPOINT_RETENTION`.
+
+## PPO Budget Calibration
+
+Run a fixed-candidate MJWarp budget comparison without training the language
+model:
+
+```bash
+python -m eureka_lite.calibrate_mjwarp [options]
+```
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--output` | `runs/calibration/mjwarp_ppo_budget.json` | JSON report destination. |
+| `--population` | `16` | Fixed reward candidates evaluated in each run. |
+| `--budgets` | `4 24 48 96` | PPO policy-iteration budgets to compare. |
+| `--seeds` | `7 17 27` | Common evaluation/training seeds. |
+| `--eval-episodes` | `5` | Verified episodes per candidate and budget. |
+| `--device` | `cuda:0` | MuJoCo Warp device. |
+
+The MJWarp evaluator flags above are also accepted, including Gym audit and
+reward backend selection.
 
 ## Standalone Reward Search
 
@@ -136,6 +169,7 @@ python -m eureka_lite [options]
 | `--worlds-per-candidate` | `4096` | MJWarp Ant worlds per candidate. |
 | `--mjwarp-evaluator` | `ppo` | `ppo` or `search`. |
 | `--mjwarp-episode-steps` | `500` | MJWarp policy horizon. |
+| `--mjwarp-training-episode-horizon` | `1000` | Maximum training episode length before an in-place reset. |
 | `--mjwarp-policy-iterations` | `96` | MJWarp policy iterations. |
 | `--mjwarp-ppo-horizon` | `32` | PPO rollout horizon. |
 | `--mjwarp-ppo-epochs` | `4` | PPO epochs. |
@@ -143,8 +177,11 @@ python -m eureka_lite [options]
 | `--mjwarp-ppo-learning-rate` | `3e-4` | PPO learning rate. |
 | `--mjwarp-elite-frac` | `0.1` | Legacy search elite fraction. |
 | `--mjwarp-rollout-mode` | `gpu` | `gpu` or `host` PPO rollout. |
-| `--mjwarp-verified-evaluator` | `gym` | `gym` or `mjwarp` verified return. |
+| `--mjwarp-verified-evaluator` | `mjwarp` | Target-domain `mjwarp` or transfer-reference `gym` verified return. |
 | `--mjwarp-verification-steps` | `1000` | Horizon for batched MJWarp verification. |
+| `--mjwarp-verified-audit-gym` | off | Store optional transfer comparison to Gym `Ant-v5`. |
+| `--mjwarp-verified-audit-max-abs-diff` | none | Fail above this audited per-episode difference. |
+| `--mjwarp-reward-backend` | `eager` | Generated reward execution backend. |
 | `--no-mjwarp-candidate-batching` | off | Disable generation-level GPU PPO candidate batching. |
 | `--no-mjwarp-cuda-graph` | off | Disable repeated-physics CUDA graph replay. |
 | `--no-negative-rlvr-samples` | off | Exclude invalid/failed samples from output training records. |
@@ -191,3 +228,4 @@ python -m eureka_lite.rlvr_trainer --records PATH --output-dir PATH [options]
 | `--beta-kl` | `0.01` | GRPO KL coefficient. |
 | `--no-resume` | off | Start without an existing trainer checkpoint. |
 | `--pause-path` | none | File whose presence pauses after an epoch. |
+| `--checkpoint-retention` | `all` | Keep `all` trainer checkpoints or only `latest`. |

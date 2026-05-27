@@ -21,7 +21,8 @@ Each RLVR iteration contains multiple EUREKA generations. In each generation:
 1. The code model samples a population of structured reward programs.
 2. Each executable reward program trains one Ant PPO policy over parallel
    MuJoCo Warp worlds.
-3. Policies are evaluated with true `Ant-v5` return.
+3. Policies are evaluated with the original Ant reward in the MJWarp target
+   environment.
 4. Candidates are ranked by verified return and the configured number of elites
    is retained as context for the next generation.
 5. The following generation receives source context, ranked elite reward
@@ -79,16 +80,19 @@ a single `total` component.
 
 ## Verified Reward and RLVR Reward
 
-`verified_reward` means the true environment return obtained by the trained
-policy. It is not replaced by the shaped reward or a failure penalty.
+`verified_reward` means the target-domain MJWarp Ant return obtained by the
+trained policy. It is not replaced by the shaped reward or a failure penalty.
 
-The default verified-return evaluator remains Gym `Ant-v5`, because it is the
-reference environment contract. A batched MuJoCo Warp verifier is implemented
-as an opt-in path for equivalence and scaling measurements; it must not replace
-the Gym default solely because it is faster.
+MuJoCo Warp Ant is the production verified-return domain and the optimization
+target for RLVR. Results produced by that path are labeled
+`mjwarp_ant_return`. Gym `Ant-v5` is retained as an optional transfer-reference
+domain: `--mjwarp-verified-audit-gym` stores per-episode Gym comparisons, and
+`--mjwarp-verified-audit-max-abs-diff` can enforce a transfer threshold for a
+specific study. A Gym discrepancy is informative about transfer, but does not
+invalidate performance in the stated MJWarp target environment.
 
 `rlvr_reward` is the scalar used to update the code model. For a successfully
-evaluated reward program, it is the verified true environment return. For an
+evaluated reward program, it is the verified MJWarp Ant return. For an
 invalid generated program or a program that fails during evaluation, it is a
 penalty below the worst successful program in the same generation:
 
@@ -154,7 +158,7 @@ Collection records contain:
 - raw generated completion and generation log probabilities;
 - parsed reward components and summed training expression;
 - lineage, elite archive, generation rank, and selection status;
-- verified true return;
+- verified target-domain return and its evaluator label;
 - RLVR reward and reward type;
 - validator or evaluation failure information;
 - PPO/MJWarp diagnostics and component statistics.
