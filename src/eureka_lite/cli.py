@@ -71,6 +71,8 @@ def main() -> None:
         mjwarp_ppo_epochs=args.mjwarp_ppo_epochs,
         mjwarp_ppo_minibatch_size=args.mjwarp_ppo_minibatch_size,
         mjwarp_ppo_learning_rate=args.mjwarp_ppo_learning_rate,
+        mjwarp_ppo_init_mode=args.mjwarp_ppo_init_mode,
+        mjwarp_base_policy_checkpoint=args.mjwarp_base_policy_checkpoint,
         mjwarp_elite_frac=args.mjwarp_elite_frac,
         mjwarp_rollout_mode=args.mjwarp_rollout_mode,
         mjwarp_verified_evaluator=args.mjwarp_verified_evaluator,

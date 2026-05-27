@@ -117,6 +117,21 @@ The serious run defaults can be changed with `--generations`, `--eureka-elites`,
 Use `--no-mjwarp-candidate-batching` or `--no-mjwarp-cuda-graph` for
 sequential/capture-disabled ablations.
 
+Base-policy warm starts are available as an optional throughput mode. They
+pretrain one original-reward MJWarp Ant PPO policy, then initialize every
+candidate from that same checkpoint:
+
+```bash
+./scripts/run_full_mjwarp_rlvr_96gb.sh \
+  --iterations 20 \
+  --pretrain-base-policy \
+  --mjwarp-ppo-init-mode base \
+  --mjwarp-policy-iterations 32
+```
+
+Use this only after validating that warm-start candidate rankings agree with
+from-scratch rankings for your target GPU and budget.
+
 Calibrate how much Ant policy training is needed before changing the serious
 run budget. This evaluates fixed reward candidates and does not update the code
 model:

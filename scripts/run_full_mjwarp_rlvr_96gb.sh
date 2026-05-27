@@ -21,6 +21,10 @@ MJWARP_PPO_HORIZON="${MJWARP_PPO_HORIZON:-32}"
 MJWARP_PPO_EPOCHS="${MJWARP_PPO_EPOCHS:-4}"
 MJWARP_PPO_MINIBATCH_SIZE="${MJWARP_PPO_MINIBATCH_SIZE:-16384}"
 MJWARP_PPO_LEARNING_RATE="${MJWARP_PPO_LEARNING_RATE:-3e-4}"
+MJWARP_PPO_INIT_MODE="${MJWARP_PPO_INIT_MODE:-scratch}"
+MJWARP_BASE_POLICY_CHECKPOINT="${MJWARP_BASE_POLICY_CHECKPOINT:-$RUN_ROOT/base_ant_mjwarp_policy.pt}"
+PRETRAIN_BASE_POLICY="${PRETRAIN_BASE_POLICY:-0}"
+FORCE_PRETRAIN_BASE_POLICY="${FORCE_PRETRAIN_BASE_POLICY:-0}"
 MJWARP_ELITE_FRAC="${MJWARP_ELITE_FRAC:-0.1}"
 MJWARP_ROLLOUT_MODE="${MJWARP_ROLLOUT_MODE:-gpu}"
 MJWARP_VERIFIED_EVALUATOR="${MJWARP_VERIFIED_EVALUATOR:-mjwarp}"
@@ -70,6 +74,12 @@ Options:
                               PPO minibatch size.
   --mjwarp-ppo-learning-rate X
                               PPO learning rate.
+  --mjwarp-ppo-init-mode NAME scratch or base. Default: scratch.
+  --mjwarp-base-policy-checkpoint PATH
+                              Base policy checkpoint for init mode base.
+  --pretrain-base-policy      Train the base policy before running RLVR if needed.
+  --force-pretrain-base-policy
+                              Retrain the base policy even if the checkpoint exists.
   --mjwarp-rollout-mode NAME  gpu or host. Default: gpu.
   --mjwarp-verified-evaluator NAME
                               mjwarp or gym. Default: mjwarp.
@@ -153,6 +163,22 @@ while [[ $# -gt 0 ]]; do
     --mjwarp-ppo-learning-rate)
       MJWARP_PPO_LEARNING_RATE="$2"
       shift 2
+      ;;
+    --mjwarp-ppo-init-mode)
+      MJWARP_PPO_INIT_MODE="$2"
+      shift 2
+      ;;
+    --mjwarp-base-policy-checkpoint)
+      MJWARP_BASE_POLICY_CHECKPOINT="$2"
+      shift 2
+      ;;
+    --pretrain-base-policy)
+      PRETRAIN_BASE_POLICY=1
+      shift
+      ;;
+    --force-pretrain-base-policy)
+      FORCE_PRETRAIN_BASE_POLICY=1
+      shift
       ;;
     --mjwarp-rollout-mode)
       MJWARP_ROLLOUT_MODE="$2"
@@ -315,6 +341,43 @@ if [[ "$RUN_SMOKE_TEST" == "1" ]]; then
     --action-mode random-once
 fi
 
+if [[ "$MJWARP_PPO_INIT_MODE" == "base" && ! -f "$MJWARP_BASE_POLICY_CHECKPOINT" && "$PRETRAIN_BASE_POLICY" != "1" ]]; then
+  cat >&2 <<EOF
+--mjwarp-ppo-init-mode base requires a checkpoint at:
+  $MJWARP_BASE_POLICY_CHECKPOINT
+
+Pass --pretrain-base-policy to create it before the RLVR run, or provide an
+existing checkpoint with --mjwarp-base-policy-checkpoint.
+EOF
+  exit 1
+fi
+
+if [[ "$PRETRAIN_BASE_POLICY" == "1" ]]; then
+  if [[ ! -f "$MJWARP_BASE_POLICY_CHECKPOINT" || "$FORCE_PRETRAIN_BASE_POLICY" == "1" ]]; then
+    log "Pretraining MJWarp Ant base PPO policy"
+    "$PY" -m eureka_lite.pretrain_mjwarp_ant_policy \
+      --output "$MJWARP_BASE_POLICY_CHECKPOINT" \
+      --worlds-per-candidate "$WORLDS_PER_CANDIDATE" \
+      --mjwarp-evaluator "$MJWARP_EVALUATOR" \
+      --mjwarp-episode-steps "$MJWARP_EPISODE_STEPS" \
+      --mjwarp-training-episode-horizon "$MJWARP_TRAINING_EPISODE_HORIZON" \
+      --mjwarp-policy-iterations "$MJWARP_POLICY_ITERATIONS" \
+      --mjwarp-ppo-horizon "$MJWARP_PPO_HORIZON" \
+      --mjwarp-ppo-epochs "$MJWARP_PPO_EPOCHS" \
+      --mjwarp-ppo-minibatch-size "$MJWARP_PPO_MINIBATCH_SIZE" \
+      --mjwarp-ppo-learning-rate "$MJWARP_PPO_LEARNING_RATE" \
+      --mjwarp-rollout-mode "$MJWARP_ROLLOUT_MODE" \
+      --mjwarp-verified-evaluator "$MJWARP_VERIFIED_EVALUATOR" \
+      --mjwarp-verification-steps "$MJWARP_VERIFICATION_STEPS" \
+      --mjwarp-reward-backend "$MJWARP_REWARD_BACKEND" \
+      --eval-episodes "$EVAL_EPISODES" \
+      --seed 0 \
+      --device cuda:0
+  else
+    log "Reusing existing base policy checkpoint: $MJWARP_BASE_POLICY_CHECKPOINT"
+  fi
+fi
+
 PIPELINE_ARGS=(
   -m eureka_lite.pipeline
   --model-id "$MODEL_ID"
@@ -332,6 +395,7 @@ PIPELINE_ARGS=(
   --mjwarp-ppo-epochs "$MJWARP_PPO_EPOCHS"
   --mjwarp-ppo-minibatch-size "$MJWARP_PPO_MINIBATCH_SIZE"
   --mjwarp-ppo-learning-rate "$MJWARP_PPO_LEARNING_RATE"
+  --mjwarp-ppo-init-mode "$MJWARP_PPO_INIT_MODE"
   --mjwarp-elite-frac "$MJWARP_ELITE_FRAC"
   --mjwarp-rollout-mode "$MJWARP_ROLLOUT_MODE"
   --mjwarp-verified-evaluator "$MJWARP_VERIFIED_EVALUATOR"
@@ -350,6 +414,10 @@ PIPELINE_ARGS=(
   --trainer-max-length "$RLVR_MAX_LENGTH"
   --checkpoint-retention "$CHECKPOINT_RETENTION"
 )
+
+if [[ -n "$MJWARP_BASE_POLICY_CHECKPOINT" ]]; then
+  PIPELINE_ARGS+=(--mjwarp-base-policy-checkpoint "$MJWARP_BASE_POLICY_CHECKPOINT")
+fi
 
 if [[ "$FORCE_TRAIN" == "1" ]]; then
   PIPELINE_ARGS+=(--force-train)

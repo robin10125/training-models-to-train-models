@@ -60,6 +60,8 @@ class FullPipelineConfig:
     overwrite_collection: bool
     force_train: bool
     mjwarp_training_episode_horizon: int = 1000
+    mjwarp_ppo_init_mode: str = "scratch"
+    mjwarp_base_policy_checkpoint: str | None = None
     mjwarp_verified_audit_gym: bool = False
     mjwarp_verified_audit_max_abs_diff: float | None = None
     mjwarp_reward_backend: str = "eager"
@@ -198,6 +200,8 @@ def collection_config(config: FullPipelineConfig, iteration: int, adapter_path: 
         mjwarp_ppo_epochs=config.mjwarp_ppo_epochs,
         mjwarp_ppo_minibatch_size=config.mjwarp_ppo_minibatch_size,
         mjwarp_ppo_learning_rate=config.mjwarp_ppo_learning_rate,
+        mjwarp_ppo_init_mode=config.mjwarp_ppo_init_mode,
+        mjwarp_base_policy_checkpoint=config.mjwarp_base_policy_checkpoint,
         mjwarp_elite_frac=config.mjwarp_elite_frac,
         mjwarp_rollout_mode=config.mjwarp_rollout_mode,
         mjwarp_verified_evaluator=config.mjwarp_verified_evaluator,
@@ -388,6 +392,8 @@ def main() -> None:
         mjwarp_ppo_epochs=args.mjwarp_ppo_epochs,
         mjwarp_ppo_minibatch_size=args.mjwarp_ppo_minibatch_size,
         mjwarp_ppo_learning_rate=args.mjwarp_ppo_learning_rate,
+        mjwarp_ppo_init_mode=args.mjwarp_ppo_init_mode,
+        mjwarp_base_policy_checkpoint=args.mjwarp_base_policy_checkpoint,
         mjwarp_elite_frac=args.mjwarp_elite_frac,
         mjwarp_rollout_mode=args.mjwarp_rollout_mode,
         mjwarp_verified_evaluator=args.mjwarp_verified_evaluator,

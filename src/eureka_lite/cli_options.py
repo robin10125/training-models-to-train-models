@@ -26,6 +26,17 @@ def add_mjwarp_options(parser: argparse.ArgumentParser, *, include_backend: bool
     parser.add_argument("--mjwarp-ppo-epochs", type=int, default=4)
     parser.add_argument("--mjwarp-ppo-minibatch-size", type=int, default=16_384)
     parser.add_argument("--mjwarp-ppo-learning-rate", type=float, default=3e-4)
+    parser.add_argument(
+        "--mjwarp-ppo-init-mode",
+        choices=["scratch", "base"],
+        default="scratch",
+        help="Initialize candidate PPO policies from scratch or from a shared base policy checkpoint.",
+    )
+    parser.add_argument(
+        "--mjwarp-base-policy-checkpoint",
+        default=None,
+        help="Path to a pretrained MJWarp Ant PPO checkpoint used when --mjwarp-ppo-init-mode=base.",
+    )
     parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)
     parser.add_argument("--mjwarp-rollout-mode", choices=["gpu", "host"], default="gpu")
     parser.add_argument("--mjwarp-verified-evaluator", choices=["mjwarp", "gym"], default="mjwarp")

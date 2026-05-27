@@ -34,6 +34,8 @@ class MjwarpOptions:
     ppo_epochs: int
     ppo_minibatch_size: int
     ppo_learning_rate: float
+    ppo_init_mode: str
+    base_policy_checkpoint: str | None
     elite_frac: float
     rollout_mode: str
     verified_evaluator: str
@@ -55,6 +57,8 @@ class MjwarpOptions:
             ppo_epochs=source.mjwarp_ppo_epochs,
             ppo_minibatch_size=source.mjwarp_ppo_minibatch_size,
             ppo_learning_rate=source.mjwarp_ppo_learning_rate,
+            ppo_init_mode=source.mjwarp_ppo_init_mode,
+            base_policy_checkpoint=source.mjwarp_base_policy_checkpoint,
             elite_frac=source.mjwarp_elite_frac,
             rollout_mode=source.mjwarp_rollout_mode,
             verified_evaluator=source.mjwarp_verified_evaluator,
@@ -88,6 +92,8 @@ class CandidateEvaluationConfig:
     mjwarp_ppo_epochs: int = 4
     mjwarp_ppo_minibatch_size: int = 16_384
     mjwarp_ppo_learning_rate: float = 3.0e-4
+    mjwarp_ppo_init_mode: str = "scratch"
+    mjwarp_base_policy_checkpoint: str | None = None
     mjwarp_elite_frac: float = 0.1
     mjwarp_rollout_mode: str = "gpu"
     mjwarp_verified_evaluator: str = "mjwarp"
@@ -130,6 +136,8 @@ class RunConfig:
     mjwarp_ppo_epochs: int = 4
     mjwarp_ppo_minibatch_size: int = 16_384
     mjwarp_ppo_learning_rate: float = 3.0e-4
+    mjwarp_ppo_init_mode: str = "scratch"
+    mjwarp_base_policy_checkpoint: str | None = None
     mjwarp_elite_frac: float = 0.1
     mjwarp_rollout_mode: str = "gpu"
     mjwarp_verified_evaluator: str = "mjwarp"
@@ -171,6 +179,8 @@ class RunConfig:
             mjwarp_ppo_epochs=int(row.get("mjwarp_ppo_epochs", 4)),
             mjwarp_ppo_minibatch_size=int(row.get("mjwarp_ppo_minibatch_size", 16_384)),
             mjwarp_ppo_learning_rate=float(row.get("mjwarp_ppo_learning_rate", 3.0e-4)),
+            mjwarp_ppo_init_mode=row.get("mjwarp_ppo_init_mode", "scratch"),
+            mjwarp_base_policy_checkpoint=row.get("mjwarp_base_policy_checkpoint"),
             mjwarp_elite_frac=float(row.get("mjwarp_elite_frac", 0.1)),
             mjwarp_rollout_mode=row.get("mjwarp_rollout_mode", "gpu"),
             mjwarp_verified_evaluator=row.get("mjwarp_verified_evaluator", "mjwarp"),

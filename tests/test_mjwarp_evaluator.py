@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
@@ -9,6 +11,7 @@ from eureka_lite.adapters import AntAdapter
 from eureka_lite.mjwarp_evaluator import (
     BatchedAntActorCritic,
     MjwarpEvaluatorConfig,
+    AntActorCritic,
     TorchRewardProgram,
     VectorizedRewardExpression,
     VectorizedRewardProgram,
@@ -22,7 +25,10 @@ from eureka_lite.mjwarp_evaluator import (
     mjwarp_control_step,
     reset_mjwarp_worlds,
     seed_torch_policy_rng,
+    load_base_policy_into_batched,
+    load_base_policy_into_single,
     train_and_evaluate_mjwarp,
+    validate_ppo_init_config,
 )
 from eureka_lite.rewards import RewardCandidate
 
@@ -243,6 +249,61 @@ class MjwarpEvaluatorTests(unittest.TestCase):
         self.assertTrue(torch.equal(actions[0], actions[1]))
         self.assertTrue(torch.equal(logprobs[0], logprobs[1]))
         self.assertTrue(torch.equal(values[0], values[1]))
+
+    def test_base_policy_checkpoint_loads_single_policy(self) -> None:
+        import torch
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "base.pt"
+            source = AntActorCritic(4, 2)
+            with torch.no_grad():
+                source.log_std.fill_(0.25)
+            torch.save(
+                {
+                    "policy_state_dict": source.state_dict(),
+                    "metadata": {"obs_dim": 4, "action_dim": 2},
+                },
+                path,
+            )
+            target = AntActorCritic(4, 2)
+            load_base_policy_into_single(target, path, obs_dim=4, action_dim=2, torch_device=torch.device("cpu"))
+            for key, value in source.state_dict().items():
+                self.assertTrue(torch.equal(value, target.state_dict()[key]))
+
+    def test_base_policy_checkpoint_replicates_into_batched_policy(self) -> None:
+        import torch
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "base.pt"
+            source = AntActorCritic(4, 2)
+            with torch.no_grad():
+                source.actor_mean.bias.fill_(0.42)
+                source.log_std.fill_(0.25)
+            torch.save(
+                {
+                    "policy_state_dict": source.state_dict(),
+                    "metadata": {"obs_dim": 4, "action_dim": 2},
+                },
+                path,
+            )
+            target = BatchedAntActorCritic(3, 4, 2)
+            load_base_policy_into_batched(
+                target,
+                path,
+                candidate_count=3,
+                obs_dim=4,
+                action_dim=2,
+                torch_device=torch.device("cpu"),
+            )
+            self.assertTrue(torch.equal(target.bias_3[0], source.actor_mean.bias))
+            self.assertTrue(torch.equal(target.bias_3[0], target.bias_3[1]))
+            self.assertTrue(torch.equal(target.bias_3[1], target.bias_3[2]))
+            self.assertTrue(torch.equal(target.log_std[0], source.log_std))
+            self.assertTrue(torch.equal(target.log_std[0], target.log_std[2]))
+
+    def test_base_init_requires_checkpoint_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "base_policy_checkpoint"):
+            validate_ppo_init_config(MjwarpEvaluatorConfig(ppo_init_mode="base"))
 
     def test_rejects_non_ant_task_before_importing_mjwarp(self) -> None:
         candidate = RewardCandidate(

@@ -5,7 +5,8 @@ import builtins
 import math
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -49,6 +50,8 @@ class MjwarpEvaluatorConfig:
     elite_frac: float = 0.1
     init_std: float = 0.35
     min_std: float = 0.03
+    ppo_init_mode: str = "scratch"
+    base_policy_checkpoint: str | None = None
     seed: int = 7
     device: str = "cuda:0"
     eval_episodes: int = 5
@@ -68,6 +71,41 @@ def validate_verification_audit_config(config: MjwarpEvaluatorConfig) -> None:
 def validate_reward_backend(backend: str) -> None:
     if backend not in {"eager", "compiled"}:
         raise ValueError("reward_backend must be one of: eager, compiled")
+
+
+def validate_ppo_init_config(config: MjwarpEvaluatorConfig) -> None:
+    if config.ppo_init_mode not in {"scratch", "base"}:
+        raise ValueError("ppo_init_mode must be one of: scratch, base")
+    if config.ppo_init_mode == "base":
+        if not config.base_policy_checkpoint:
+            raise ValueError("base_policy_checkpoint is required when ppo_init_mode='base'")
+        if config.evaluator != "ppo":
+            raise ValueError("base PPO initialization requires evaluator='ppo'")
+
+
+def base_policy_metadata(config: MjwarpEvaluatorConfig) -> dict[str, Any]:
+    metadata = {
+        "ppo_init_mode": config.ppo_init_mode,
+        "base_policy_checkpoint": config.base_policy_checkpoint,
+        "candidate_finetune_budget": config.worlds_per_candidate * config.episode_steps * config.policy_iterations,
+    }
+    if config.ppo_init_mode == "base" and config.base_policy_checkpoint:
+        checkpoint_metadata = read_base_policy_checkpoint_metadata(config.base_policy_checkpoint)
+        metadata.update(
+            {
+                "base_policy_verified_return": checkpoint_metadata.get("mean_verified_return"),
+                "base_policy_training_budget": checkpoint_metadata.get("training_world_steps"),
+            }
+        )
+    return metadata
+
+
+def read_base_policy_checkpoint_metadata(path: str | Path) -> dict[str, Any]:
+    import torch
+
+    checkpoint = load_base_policy_checkpoint(path, map_location="cpu")
+    metadata = checkpoint.get("metadata", {})
+    return metadata if isinstance(metadata, dict) else {}
 
 
 def build_verification_audit(
@@ -121,6 +159,7 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
         raise ValueError("verification_steps must be at least 1")
     validate_verification_audit_config(config)
     validate_reward_backend(config.reward_backend)
+    validate_ppo_init_config(config)
     if config.ppo_horizon < 1:
         raise ValueError("ppo_horizon must be at least 1")
     if not 0.0 < config.elite_frac <= 1.0:
@@ -250,6 +289,7 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
             "ppo_epochs": config.ppo_epochs,
             "ppo_minibatch_size": config.ppo_minibatch_size,
             "ppo_hidden_sizes": [256, 128, 64],
+            **base_policy_metadata(config),
             "rollout_mode": config.rollout_mode,
             "verified_evaluator": config.verified_evaluator,
             "verified_audit": verification_audit,
@@ -283,6 +323,7 @@ def train_and_evaluate_mjwarp_batch(
         raise ValueError("verified_evaluator must be one of: mjwarp, gym")
     validate_verification_audit_config(config)
     validate_reward_backend(config.reward_backend)
+    validate_ppo_init_config(config)
 
     try:
         import mujoco_warp as mjw
@@ -404,6 +445,7 @@ def train_and_evaluate_mjwarp_batch(
                 "ppo_epochs": config.ppo_epochs,
                 "ppo_minibatch_size": config.ppo_minibatch_size,
                 "ppo_hidden_sizes": [256, 128, 64],
+                **base_policy_metadata(config),
                 "rollout_mode": config.rollout_mode,
                 "verified_evaluator": config.verified_evaluator,
                 "verified_audit": build_verification_audit(
@@ -423,6 +465,132 @@ def train_and_evaluate_mjwarp_batch(
         }
         for index, eval_returns in enumerate(eval_returns_by_candidate)
     ]
+
+
+def pretrain_original_reward_policy(config: MjwarpEvaluatorConfig, output_path: str | Path) -> dict[str, Any]:
+    if config.task != "Ant-v5":
+        raise ValueError("The MJWarp base-policy pretrainer currently supports only Ant-v5")
+    if config.evaluator != "ppo":
+        raise ValueError("Base-policy pretraining requires evaluator='ppo'")
+    if config.ppo_init_mode != "scratch":
+        config = dataclass_replace(config, ppo_init_mode="scratch", base_policy_checkpoint=None)
+    validate_ppo_init_config(config)
+    validate_reward_backend(config.reward_backend)
+    validate_verification_audit_config(config)
+
+    try:
+        import mujoco_warp as mjw
+        import torch
+        import warp as wp
+    except ImportError as exc:
+        raise RuntimeError(
+            "The MJWarp base-policy pretrainer requires optional GPU dependencies. Install with "
+            "`pip install -e '.[mjwarp]'`."
+        ) from exc
+
+    started_at = time.monotonic()
+    reward_program = VectorizedRewardProgram(
+        component_expressions={
+            "forward": "forward_reward",
+            "survive": "survive_reward",
+            "control": "-control_cost",
+        },
+        expression="",
+        allowed_names=get_adapter(config.task).reward_variables,
+    )
+    env = gym.make(config.task)
+    try:
+        mjm = env.unwrapped.model
+        frame_skip = int(env.unwrapped.frame_skip)
+        dt = float(mjm.opt.timestep * frame_skip)
+        action_dim = int(mjm.nu)
+        obs_dim = int(mjm.nq - 2 + mjm.nv)
+        wp.init()
+        with wp.ScopedDevice(config.device):
+            model = mjw.put_model(mjm)
+            data = mjw.make_data(mjm, nworld=config.worlds_per_candidate)
+            wp.synchronize()
+            policy, best_shaped_return, iteration_summaries = train_ppo_policy(
+                model=model,
+                data=data,
+                mjm=mjm,
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                reward_program=reward_program,
+                config=config,
+                dt=dt,
+                frame_skip=frame_skip,
+                wp=wp,
+                mjw=mjw,
+            )
+            eval_data = mjw.make_data(mjm, nworld=config.eval_episodes)
+            wp.synchronize()
+            eval_returns = evaluate_policy_in_mjwarp(
+                task=config.task,
+                model=model,
+                data=eval_data,
+                mjm=mjm,
+                policy=("ppo", policy),
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                eval_episodes=config.eval_episodes,
+                episode_steps=config.verification_steps,
+                seed=config.seed + 10_000,
+                device=config.device,
+                dt=dt,
+                frame_skip=frame_skip,
+                use_cuda_graph=config.use_cuda_graph,
+                wp=wp,
+                mjw=mjw,
+            )
+    finally:
+        env.close()
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "policy_state_dict": {key: value.detach().cpu() for key, value in policy.state_dict().items()},
+        "metadata": {
+            "task": config.task,
+            "reward": "original_mjwarp_ant_reward",
+            "obs_dim": obs_dim,
+            "action_dim": action_dim,
+            "worlds_per_candidate": config.worlds_per_candidate,
+            "episode_steps": config.episode_steps,
+            "policy_iterations": config.policy_iterations,
+            "training_world_steps": config.worlds_per_candidate * config.episode_steps * config.policy_iterations,
+            "ppo_horizon": config.ppo_horizon,
+            "ppo_epochs": config.ppo_epochs,
+            "ppo_minibatch_size": config.ppo_minibatch_size,
+            "ppo_learning_rate": config.ppo_learning_rate,
+            "verified_evaluator": "mjwarp",
+            "verification_steps": config.verification_steps,
+            "eval_episodes": config.eval_episodes,
+            "seed": config.seed,
+            "device": config.device,
+            "best_shaped_return": best_shaped_return,
+            "mean_verified_return": float(np.mean(eval_returns)),
+            "std_verified_return": float(np.std(eval_returns)),
+            "episode_rewards": eval_returns,
+            "elapsed_seconds": time.monotonic() - started_at,
+            "config": asdict(config),
+            "iteration_summaries": iteration_summaries,
+        },
+    }
+    torch.save(payload, output)
+    return {
+        "output": output.as_posix(),
+        "mean_verified_return": payload["metadata"]["mean_verified_return"],
+        "std_verified_return": payload["metadata"]["std_verified_return"],
+        "episode_rewards": eval_returns,
+        "elapsed_seconds": payload["metadata"]["elapsed_seconds"],
+    }
+
+
+def dataclass_replace(config: MjwarpEvaluatorConfig, **updates: Any) -> MjwarpEvaluatorConfig:
+    values = asdict(config)
+    values.update(updates)
+    return MjwarpEvaluatorConfig(**values)
 
 
 def rollout_policy_population(
@@ -606,6 +774,110 @@ def seed_torch_policy_rng(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def load_base_policy_checkpoint(path: str | Path, *, map_location: Any = "cpu") -> dict[str, Any]:
+    import torch
+
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Base policy checkpoint does not exist: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"Base policy checkpoint must be a dict: {checkpoint_path}")
+    state = checkpoint.get("policy_state_dict", checkpoint)
+    if not isinstance(state, dict):
+        raise ValueError(f"Base policy checkpoint is missing policy_state_dict: {checkpoint_path}")
+    return checkpoint
+
+
+def load_base_policy_into_single(
+    policy: Any,
+    checkpoint_path: str | Path,
+    *,
+    obs_dim: int,
+    action_dim: int,
+    torch_device: Any,
+) -> dict[str, Any]:
+    checkpoint = load_base_policy_checkpoint(checkpoint_path, map_location=torch_device)
+    _validate_base_policy_dimensions(checkpoint, obs_dim=obs_dim, action_dim=action_dim, path=checkpoint_path)
+    policy.load_state_dict(checkpoint.get("policy_state_dict", checkpoint))
+    return checkpoint
+
+
+def load_base_policy_into_batched(
+    policy: Any,
+    checkpoint_path: str | Path,
+    *,
+    candidate_count: int,
+    obs_dim: int,
+    action_dim: int,
+    torch_device: Any,
+) -> dict[str, Any]:
+    import torch
+
+    checkpoint = load_base_policy_checkpoint(checkpoint_path, map_location=torch_device)
+    _validate_base_policy_dimensions(checkpoint, obs_dim=obs_dim, action_dim=action_dim, path=checkpoint_path)
+    base = AntActorCritic(obs_dim, action_dim).to(torch_device)
+    base.load_state_dict(checkpoint.get("policy_state_dict", checkpoint))
+    linear_layers = [base.backbone[0], base.backbone[2], base.backbone[4], base.actor_mean, base.critic]
+    with torch.no_grad():
+        for index, layer in enumerate(linear_layers):
+            getattr(policy, f"weight_{index}").copy_(layer.weight.unsqueeze(0).repeat(candidate_count, 1, 1))
+            getattr(policy, f"bias_{index}").copy_(layer.bias.unsqueeze(0).repeat(candidate_count, 1))
+        policy.log_std.copy_(base.log_std.unsqueeze(0).repeat(candidate_count, 1))
+    return checkpoint
+
+
+def maybe_initialize_policy_from_base(
+    policy: Any,
+    config: MjwarpEvaluatorConfig,
+    *,
+    candidate_count: int | None,
+    obs_dim: int,
+    action_dim: int,
+    torch_device: Any,
+) -> dict[str, Any] | None:
+    if config.ppo_init_mode == "scratch":
+        return None
+    if not config.base_policy_checkpoint:
+        raise ValueError("base_policy_checkpoint is required when ppo_init_mode='base'")
+    if candidate_count is None:
+        return load_base_policy_into_single(
+            policy,
+            config.base_policy_checkpoint,
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            torch_device=torch_device,
+        )
+    return load_base_policy_into_batched(
+        policy,
+        config.base_policy_checkpoint,
+        candidate_count=candidate_count,
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        torch_device=torch_device,
+    )
+
+
+def _validate_base_policy_dimensions(
+    checkpoint: dict[str, Any],
+    *,
+    obs_dim: int,
+    action_dim: int,
+    path: str | Path,
+) -> None:
+    metadata = checkpoint.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    checkpoint_obs_dim = metadata.get("obs_dim")
+    checkpoint_action_dim = metadata.get("action_dim")
+    if checkpoint_obs_dim is not None and int(checkpoint_obs_dim) != obs_dim:
+        raise ValueError(f"Base policy checkpoint {path} obs_dim={checkpoint_obs_dim} does not match {obs_dim}")
+    if checkpoint_action_dim is not None and int(checkpoint_action_dim) != action_dim:
+        raise ValueError(
+            f"Base policy checkpoint {path} action_dim={checkpoint_action_dim} does not match {action_dim}"
+        )
+
+
 def train_ppo_policy_host(
     *,
     model: Any,
@@ -623,6 +895,14 @@ def train_ppo_policy_host(
 
     torch_device = torch.device("cuda" if config.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
     policy = AntActorCritic(obs_dim, action_dim).to(torch_device)
+    maybe_initialize_policy_from_base(
+        policy,
+        config,
+        candidate_count=None,
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        torch_device=torch_device,
+    )
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.ppo_learning_rate)
     iteration_summaries = []
     best_shaped_return = float("-inf")
@@ -761,6 +1041,14 @@ def train_ppo_policy_gpu(
 
     torch_device = torch.device("cuda" if config.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
     policy = AntActorCritic(obs_dim, action_dim).to(torch_device)
+    maybe_initialize_policy_from_base(
+        policy,
+        config,
+        candidate_count=None,
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        torch_device=torch_device,
+    )
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.ppo_learning_rate)
     torch_reward_program = make_torch_reward_program(
         component_expressions=reward_program.component_expressions,
@@ -919,6 +1207,14 @@ def train_ppo_policy_gpu_batch(
     torch_device = torch.device("cuda" if config.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
     seed_torch_policy_rng(config.seed)
     policy = BatchedAntActorCritic(candidate_count, obs_dim, action_dim).to(torch_device)
+    maybe_initialize_policy_from_base(
+        policy,
+        config,
+        candidate_count=candidate_count,
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        torch_device=torch_device,
+    )
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.ppo_learning_rate)
     allowed_names = get_adapter(config.task).reward_variables
     torch_programs = [

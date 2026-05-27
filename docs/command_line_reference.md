@@ -34,6 +34,8 @@ python -m eureka_lite.pipeline [options]
 | `--mjwarp-ppo-epochs` | `4` | PPO optimization epochs per rollout batch. |
 | `--mjwarp-ppo-minibatch-size` | `16384` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate` | `3e-4` | PPO learning rate. |
+| `--mjwarp-ppo-init-mode` | `scratch` | Candidate policy initialization: `scratch` or shared pretrained `base`. |
+| `--mjwarp-base-policy-checkpoint` | none | Base policy checkpoint used when `--mjwarp-ppo-init-mode base`. |
 | `--mjwarp-elite-frac` | `0.1` | Elite fraction used only by legacy `search`. |
 | `--mjwarp-rollout-mode` | `gpu` | PPO rollout implementation: GPU-resident `gpu` or NumPy reference `host`. |
 | `--mjwarp-verified-evaluator` | `mjwarp` | RLVR verified-return domain: target `mjwarp` or transfer-reference `gym`. |
@@ -103,6 +105,10 @@ Supported script options:
 | `--mjwarp-ppo-epochs N` | PPO update epochs. |
 | `--mjwarp-ppo-minibatch-size N` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate X` | PPO learning rate. |
+| `--mjwarp-ppo-init-mode NAME` | `scratch` or `base`. |
+| `--mjwarp-base-policy-checkpoint PATH` | Checkpoint for `base` initialization. |
+| `--pretrain-base-policy` | Train the base policy first if the checkpoint is missing. |
+| `--force-pretrain-base-policy` | Retrain the base policy even if the checkpoint exists. |
 | `--mjwarp-rollout-mode NAME` | `gpu` or `host`; defaults to GPU-resident PPO. |
 | `--mjwarp-verified-evaluator NAME` | `mjwarp` or `gym`; defaults to the MJWarp target domain. |
 | `--mjwarp-verification-steps N` | Horizon for MJWarp verification. |
@@ -124,7 +130,28 @@ including `ITERATIONS`, `POPULATION`, `GENERATIONS`, `EUREKA_ELITES`,
 `WORLDS_PER_CANDIDATE`, `MJWARP_BATCH_CANDIDATES`, `MJWARP_CUDA_GRAPH`,
 `INCLUDE_NEGATIVE_RLVR_SAMPLES`, `NEGATIVE_RLVR_MARGIN`,
 `MJWARP_TRAINING_EPISODE_HORIZON`, `MJWARP_VERIFIED_AUDIT_GYM`,
-`MJWARP_REWARD_BACKEND`, and `CHECKPOINT_RETENTION`.
+`MJWARP_REWARD_BACKEND`, `MJWARP_PPO_INIT_MODE`,
+`MJWARP_BASE_POLICY_CHECKPOINT`, `PRETRAIN_BASE_POLICY`, and
+`CHECKPOINT_RETENTION`.
+
+## MJWarp Base Policy Pretraining
+
+Train a reusable original-reward Ant policy for `--mjwarp-ppo-init-mode base`:
+
+```bash
+python -m eureka_lite.pretrain_mjwarp_ant_policy \
+  --output checkpoints/base_ant_mjwarp_policy.pt \
+  --worlds-per-candidate 4096 \
+  --mjwarp-policy-iterations 96
+```
+
+Then use it for candidate evaluation:
+
+```bash
+python -m eureka_lite.pipeline \
+  --mjwarp-ppo-init-mode base \
+  --mjwarp-base-policy-checkpoint checkpoints/base_ant_mjwarp_policy.pt
+```
 
 ## PPO Budget Calibration
 
@@ -175,6 +202,8 @@ python -m eureka_lite [options]
 | `--mjwarp-ppo-epochs` | `4` | PPO epochs. |
 | `--mjwarp-ppo-minibatch-size` | `16384` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate` | `3e-4` | PPO learning rate. |
+| `--mjwarp-ppo-init-mode` | `scratch` | Candidate policy initialization: `scratch` or shared pretrained `base`. |
+| `--mjwarp-base-policy-checkpoint` | none | Base policy checkpoint used when `--mjwarp-ppo-init-mode base`. |
 | `--mjwarp-elite-frac` | `0.1` | Legacy search elite fraction. |
 | `--mjwarp-rollout-mode` | `gpu` | `gpu` or `host` PPO rollout. |
 | `--mjwarp-verified-evaluator` | `mjwarp` | Target-domain `mjwarp` or transfer-reference `gym` verified return. |

@@ -148,6 +148,8 @@ def mjwarp_evaluator_config(config: CandidateEvaluationConfig) -> Any:
         ppo_epochs=options.ppo_epochs,
         ppo_minibatch_size=options.ppo_minibatch_size,
         ppo_learning_rate=options.ppo_learning_rate,
+        ppo_init_mode=options.ppo_init_mode,
+        base_policy_checkpoint=options.base_policy_checkpoint,
         elite_frac=options.elite_frac,
         rollout_mode=options.rollout_mode,
         verified_evaluator=options.verified_evaluator,
