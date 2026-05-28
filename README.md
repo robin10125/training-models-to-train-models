@@ -25,19 +25,11 @@ and ask the model for named reward components so the evaluator can report
 component-level statistics during reflection. Invalid generated reward code and
 failed evaluations are included as penalized RLVR samples by default.
 
-Design rationale is documented in [docs/design_decisions.md](docs/design_decisions.md).
-All run flags are listed in [docs/command_line_reference.md](docs/command_line_reference.md).
-The GPU-resident Ant PPO implementation and remaining validation work are tracked in
-[docs/gpu_rollout_optimization_plan.md](docs/gpu_rollout_optimization_plan.md).
-The paired-seed and policy-budget settings used for stable RLVR rewards are
-documented in [docs/eureka_signal_stability.md](docs/eureka_signal_stability.md).
-The generation-level GPU candidate batching change is documented in
-[docs/candidate_batched_gpu_evaluation_change.md](docs/candidate_batched_gpu_evaluation_change.md).
-The episode-reset, verification-audit, calibration, and retention controls are
-documented in
-[docs/gpu_pipeline_safeguards_2026-05-27.md](docs/gpu_pipeline_safeguards_2026-05-27.md).
-The search-state, resume, and canonical RLVR publication refactor is documented
-in [docs/search_refactor_2026-05-27.md](docs/search_refactor_2026-05-27.md).
+The experiment invariants that must be preserved by future changes are defined
+in [docs/experiment_constitution.md](docs/experiment_constitution.md). Design
+rationale, command-line flags, GPU execution notes, benchmark summaries, and
+dated change records are consolidated in
+[docs/project_documentation.md](docs/project_documentation.md).
 
 ## Setup
 
@@ -61,11 +53,11 @@ python -m pip install torch
 python -m pip install -e ".[mjwarp]"
 ```
 
-## Smoke Test
+## RTX PRO 6000 Blackwell Smoke Test
 
-Use this for a 3-iteration smoke test on a 96 GB GPU. It uses the full candidate
-and Ant-world batch size, with 3 EUREKA generations and 4 elites per RLVR
-iteration, but shortens inner PPO training for validation only.
+Use this first on an NVIDIA RTX PRO 6000 Blackwell 96 GB GPU. It runs the full
+16-candidate, 4096-world MJWarp shape, but uses a short PPO budget so you can
+verify setup, checkpointing, generation, evaluation, and RLVR training.
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
@@ -74,63 +66,72 @@ iteration, but shortens inner PPO training for validation only.
   --mjwarp-policy-iterations 4
 ```
 
-## Serious Run
+## RTX PRO 6000 Blackwell Serious Run
 
-Use this for the intended 96 GB GPU experiment: 20 RLVR iterations, 16 reward
-candidates per EUREKA generation, 3 EUREKA generations per RLVR iteration, 4
-ranked elites in each refinement prompt, 4096 Ant worlds per candidate, and one
-PPO actor-critic network per reward candidate. Each reward candidate receives
-`196,608,000` Ant control transitions (`4096 * 500 * 96`), and candidates in
-the same EUREKA generation use a common policy/evaluation seed for paired
-ranking. The default MJWarp evaluator is
-`ppo`; the older lightweight evaluator remains available with
-`--mjwarp-evaluator search`.
-PPO rollouts and verified reward evaluation use the GPU-resident MuJoCo Warp
-Ant environment by default. This is the target domain for the experiment:
-RLVR trains the code model to produce reward programs that yield strong Ant
-policies in MJWarp. Gym `Ant-v5` evaluation is an optional transfer diagnostic,
-not the objective being optimized.
-The GPU PPO path batches the `16` candidate policies into one simulator job
-(`65536` total worlds) while retaining `4096` worlds and one independent policy
-per candidate. Completed Ant worlds reset immediately in place while preserving
-the PPO transition terminal flag; `--mjwarp-training-episode-horizon 1000`
-keeps training episodes aligned with the Ant time limit independently of the
-`500`-step PPO collection iteration. MuJoCo physics substeps use CUDA graph
-replay by default.
-
-To measure transfer to the Gym reference implementation, run an optional audit:
+Use this for the full RTX PRO 6000 Blackwell 96 GB experiment from scratch:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
-  --run-root runs/audit_96gb_mjwarp_rlvr \
-  --iterations 1 \
-  --mjwarp-policy-iterations 4 \
-  --mjwarp-verified-audit-gym
+  --run-root runs/deepseek_lite_ant_mjwarp_rlvr \
+  --iterations 20
 ```
 
-```bash
-./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20
-```
+Defaults for this command:
 
-The serious run defaults can be changed with `--generations`, `--eureka-elites`,
-`--population`, `--worlds-per-candidate`, and `--mjwarp-policy-iterations`.
-Use `--no-mjwarp-candidate-batching` or `--no-mjwarp-cuda-graph` for
-sequential/capture-disabled ablations.
+- `16` candidates per EUREKA generation
+- `3` EUREKA generations per RLVR iteration
+- `4` elites carried into refinement prompts
+- `4096` MJWarp Ant worlds per candidate
+- `96` PPO policy iterations per candidate
+- MJWarp verified return as the RLVR reward
+- GRPO LoRA updates after each collection iteration
 
-Base-policy warm starts are available as an optional throughput mode. They
-pretrain one original-reward MJWarp Ant PPO policy, then initialize every
-candidate from that same checkpoint:
+Use the warm-start version when you want the faster RTX PRO 6000 Blackwell path.
+It pretrains one original-reward MJWarp Ant PPO policy, then initializes every
+candidate from that checkpoint and uses a shorter candidate fine-tuning budget:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
+  --run-root runs/deepseek_lite_ant_mjwarp_rlvr_base \
   --iterations 20 \
   --pretrain-base-policy \
   --mjwarp-ppo-init-mode base \
   --mjwarp-policy-iterations 32
 ```
 
-Use this only after validating that warm-start candidate rankings agree with
-from-scratch rankings for your target GPU and budget.
+To reuse an existing base-policy checkpoint:
+
+```bash
+./scripts/run_full_mjwarp_rlvr_96gb.sh \
+  --run-root runs/deepseek_lite_ant_mjwarp_rlvr_base \
+  --iterations 20 \
+  --mjwarp-ppo-init-mode base \
+  --mjwarp-base-policy-checkpoint runs/deepseek_lite_ant_mjwarp_rlvr_base/base_ant_mjwarp_policy.pt \
+  --mjwarp-policy-iterations 32
+```
+
+The warm-start path is faster, but it changes the inner question from training
+Ant from scratch to fine-tuning a competent Ant policy. Use the from-scratch
+command for reference runs.
+
+To measure transfer to Gym `Ant-v5` as a diagnostic, add:
+
+```bash
+--mjwarp-verified-audit-gym
+```
+
+To exclude invalid code and failed evaluations from model updates for an
+ablation run, add:
+
+```bash
+--no-negative-rlvr-samples
+```
+
+For bounded trainer checkpoint storage, add:
+
+```bash
+--checkpoint-retention latest
+```
 
 Calibrate how much Ant policy training is needed before changing the serious
 run budget. This evaluates fixed reward candidates and does not update the code
@@ -143,20 +144,6 @@ model:
   --budgets 4 24 48 96 \
   --seeds 7 17 27 \
   --mjwarp-verified-audit-gym
-```
-
-To exclude invalid code and failed evaluations from model updates for an
-ablation run:
-
-```bash
-./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20 --no-negative-rlvr-samples
-```
-
-For multi-epoch trainer runs with bounded resume storage, retain only the most
-recent complete RLVR checkpoint:
-
-```bash
-./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20 --checkpoint-retention latest
 ```
 
 Outputs are written under:
@@ -173,7 +160,6 @@ Pause a running 96 GB pipeline:
 touch runs/deepseek_lite_ant_mjwarp_rlvr/PAUSE
 ```
 
-The process exits cleanly after the current candidate batch or trainer epoch.
 With the default GPU batching, the batch is one EUREKA generation; pass
 `--no-mjwarp-candidate-batching` for candidate-by-candidate pause boundaries.
 
