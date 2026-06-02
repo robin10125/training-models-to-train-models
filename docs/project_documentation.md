@@ -139,13 +139,13 @@ MJWarp/Ant flags:
 | `--mjwarp-evaluator` | `ppo` | `ppo` or legacy `search`. |
 | `--mjwarp-episode-steps` | `500` | PPO control steps per policy iteration. |
 | `--mjwarp-training-episode-horizon` | `1000` | Training episode timeout before reset. |
-| `--mjwarp-policy-iterations` | `96` | Serious from-scratch PPO iterations. |
+| `--mjwarp-policy-iterations` | `96` in Python CLI, `32` in 96 GB script | Candidate PPO iterations. |
 | `--mjwarp-ppo-horizon` | `32` | PPO rollout horizon before update. |
 | `--mjwarp-ppo-epochs` | `4` | PPO optimization epochs. |
 | `--mjwarp-ppo-minibatch-size` | `16384` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate` | `3e-4` | PPO learning rate. |
-| `--mjwarp-ppo-init-mode` | `scratch` | `scratch` or shared pretrained `base`. |
-| `--mjwarp-base-policy-checkpoint` | none | Base checkpoint for `base` mode. |
+| `--mjwarp-ppo-init-mode` | `base` | Shared pretrained `base` or cold-start `scratch`. |
+| `--mjwarp-base-policy-checkpoint` | `checkpoints/base_ant_mjwarp_policy.pt` | Base checkpoint for `base` mode. |
 | `--mjwarp-rollout-mode` | `gpu` | `gpu` or `host`. |
 | `--mjwarp-verified-evaluator` | `mjwarp` | Target `mjwarp` or transfer `gym`. |
 | `--mjwarp-verification-steps` | `1000` | Verified rollout horizon. |
@@ -197,6 +197,8 @@ Extra script-only flags:
 | --- | --- |
 | `--pretrain-base-policy` | Train a base policy if missing. |
 | `--force-pretrain-base-policy` | Retrain base policy even if present. |
+| `--mjwarp-base-policy-iterations N` | PPO iterations used to pretrain the base policy; default `96`. |
+| `--cold-start` | Use scratch PPO initialization and 96 candidate iterations. |
 | `--allow-small-gpu` | Bypass 96 GB memory preflight. |
 | `--no-smoke-test` | Skip startup MJWarp smoke test. |
 
@@ -230,7 +232,7 @@ python -m eureka_lite [options]
 The RLVR update should learn from differences in reward programs, not avoidable
 randomness in Ant policy training.
 
-Serious runs use:
+Cold-start reference runs use:
 
 ```text
 4096 worlds * 500 control steps * 96 policy iterations
@@ -498,8 +500,8 @@ Supported initialization modes:
 
 | Mode | Meaning | Use |
 | --- | --- | --- |
-| `scratch` | Current behavior; seeded random policy initialization. | Reference and EUREKA-style checks. |
-| `base` | Every candidate starts from the same pretrained original-reward policy. | Fast large-scale RLVR after validation. |
+| `base` | Every candidate starts from the same pretrained original-reward policy. | Default large-scale RLVR mode. |
+| `scratch` | Seeded random policy initialization. | Cold-start reference and EUREKA-style checks. |
 
 Planned future mode:
 
@@ -516,14 +518,19 @@ python -m eureka_lite.pretrain_mjwarp_ant_policy \
   --mjwarp-policy-iterations 96
 ```
 
-Use base initialization:
+Use default base initialization:
+
+```bash
+./scripts/run_full_mjwarp_rlvr_96gb.sh \
+  --iterations 20
+```
+
+Use cold-start reference initialization:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
   --iterations 20 \
-  --pretrain-base-policy \
-  --mjwarp-ppo-init-mode base \
-  --mjwarp-policy-iterations 32
+  --cold-start
 ```
 
 Candidate fine-tuning budget examples:
@@ -543,11 +550,11 @@ Validation requirement:
 - Look for rewards that merely preserve the base policy without improving
   learning.
 
-Keep CLI defaults conservative:
+Current default:
 
 ```text
-default mode: scratch
-recommended large-GPU mode after validation: base
+default large-GPU script mode: base warm start
+reference cold-start mode: scratch with 96 candidate iterations
 ```
 
 Warm starts must not change the scalar RLVR reward. Successful candidates still
@@ -568,7 +575,7 @@ Smoke test:
   --mjwarp-policy-iterations 4
 ```
 
-Full from-scratch run:
+Default warm-start run:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
@@ -576,15 +583,13 @@ Full from-scratch run:
   --iterations 20
 ```
 
-Warm-start run:
+Cold-start reference run:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
-  --run-root runs/deepseek_lite_ant_mjwarp_rlvr_base \
+  --run-root runs/deepseek_lite_ant_mjwarp_rlvr_cold \
   --iterations 20 \
-  --pretrain-base-policy \
-  --mjwarp-ppo-init-mode base \
-  --mjwarp-policy-iterations 32
+  --cold-start
 ```
 
 Pause:

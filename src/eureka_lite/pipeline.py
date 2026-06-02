@@ -60,8 +60,8 @@ class FullPipelineConfig:
     overwrite_collection: bool
     force_train: bool
     mjwarp_training_episode_horizon: int = 1000
-    mjwarp_ppo_init_mode: str = "scratch"
-    mjwarp_base_policy_checkpoint: str | None = None
+    mjwarp_ppo_init_mode: str = "base"
+    mjwarp_base_policy_checkpoint: str | None = "checkpoints/base_ant_mjwarp_policy.pt"
     mjwarp_verified_audit_gym: bool = False
     mjwarp_verified_audit_max_abs_diff: float | None = None
     mjwarp_reward_backend: str = "eager"

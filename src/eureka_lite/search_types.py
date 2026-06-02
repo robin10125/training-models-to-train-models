@@ -92,8 +92,8 @@ class CandidateEvaluationConfig:
     mjwarp_ppo_epochs: int = 4
     mjwarp_ppo_minibatch_size: int = 16_384
     mjwarp_ppo_learning_rate: float = 3.0e-4
-    mjwarp_ppo_init_mode: str = "scratch"
-    mjwarp_base_policy_checkpoint: str | None = None
+    mjwarp_ppo_init_mode: str = "base"
+    mjwarp_base_policy_checkpoint: str | None = "checkpoints/base_ant_mjwarp_policy.pt"
     mjwarp_elite_frac: float = 0.1
     mjwarp_rollout_mode: str = "gpu"
     mjwarp_verified_evaluator: str = "mjwarp"
@@ -136,8 +136,8 @@ class RunConfig:
     mjwarp_ppo_epochs: int = 4
     mjwarp_ppo_minibatch_size: int = 16_384
     mjwarp_ppo_learning_rate: float = 3.0e-4
-    mjwarp_ppo_init_mode: str = "scratch"
-    mjwarp_base_policy_checkpoint: str | None = None
+    mjwarp_ppo_init_mode: str = "base"
+    mjwarp_base_policy_checkpoint: str | None = "checkpoints/base_ant_mjwarp_policy.pt"
     mjwarp_elite_frac: float = 0.1
     mjwarp_rollout_mode: str = "gpu"
     mjwarp_verified_evaluator: str = "mjwarp"
@@ -179,8 +179,10 @@ class RunConfig:
             mjwarp_ppo_epochs=int(row.get("mjwarp_ppo_epochs", 4)),
             mjwarp_ppo_minibatch_size=int(row.get("mjwarp_ppo_minibatch_size", 16_384)),
             mjwarp_ppo_learning_rate=float(row.get("mjwarp_ppo_learning_rate", 3.0e-4)),
-            mjwarp_ppo_init_mode=row.get("mjwarp_ppo_init_mode", "scratch"),
-            mjwarp_base_policy_checkpoint=row.get("mjwarp_base_policy_checkpoint"),
+            mjwarp_ppo_init_mode=row.get("mjwarp_ppo_init_mode", "base"),
+            mjwarp_base_policy_checkpoint=row.get(
+                "mjwarp_base_policy_checkpoint", "checkpoints/base_ant_mjwarp_policy.pt"
+            ),
             mjwarp_elite_frac=float(row.get("mjwarp_elite_frac", 0.1)),
             mjwarp_rollout_mode=row.get("mjwarp_rollout_mode", "gpu"),
             mjwarp_verified_evaluator=row.get("mjwarp_verified_evaluator", "mjwarp"),

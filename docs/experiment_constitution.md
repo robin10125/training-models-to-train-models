@@ -112,8 +112,9 @@ ablation.
 
 ## Warm-Start Constraint
 
-Base-policy warm starts are allowed as an explicit throughput mode, not as a
-silent replacement for from-scratch EUREKA evaluation.
+Base-policy warm starts are the default operational mode for the serious
+large-GPU experiment. They must remain explicit in command lines and metadata
+and must not be described as identical to from-scratch EUREKA evaluation.
 
 In `base` mode:
 
@@ -173,7 +174,7 @@ the active resume point or the records needed to audit model updates.
 
 ## Default Serious Configuration
 
-The current reference serious configuration is:
+The current default serious configuration is:
 
 ```text
 task: Ant-v5 target behavior in MJWarp
@@ -181,14 +182,18 @@ candidates per EUREKA generation: 16
 EUREKA generations per RLVR iteration: 3
 elites per generation: 4
 worlds per candidate: 4096
-PPO policy iterations from scratch: 96
+PPO init mode: base warm start
+base-policy PPO iterations: 96
+candidate PPO fine-tuning iterations: 32
 control steps per policy iteration: 500
 verified evaluator: MJWarp
 outer trainer: GRPO with LoRA
 ```
 
-Smoke tests may reduce the PPO budget. Warm-start runs may reduce the candidate
-fine-tuning budget. Both must be explicit in command lines and metadata.
+The cold-start reference configuration is `--mjwarp-ppo-init-mode scratch` with
+`--mjwarp-policy-iterations 96`. Smoke tests may reduce the PPO budget. All
+budget and initialization changes must be explicit in command lines and
+metadata.
 
 ## Change Review Checklist
 
@@ -199,4 +204,3 @@ Before accepting a change, answer these questions:
 3. Are candidates in a comparison group given equal budget and paired seeds?
 4. Are invalid and failed completions handled explicitly?
 5. Are lineage, prompt, completion, rank, and reward metadata preserved?
-

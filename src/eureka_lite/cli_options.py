@@ -29,12 +29,12 @@ def add_mjwarp_options(parser: argparse.ArgumentParser, *, include_backend: bool
     parser.add_argument(
         "--mjwarp-ppo-init-mode",
         choices=["scratch", "base"],
-        default="scratch",
-        help="Initialize candidate PPO policies from scratch or from a shared base policy checkpoint.",
+        default="base",
+        help="Initialize candidate PPO policies from a shared base checkpoint or from scratch.",
     )
     parser.add_argument(
         "--mjwarp-base-policy-checkpoint",
-        default=None,
+        default="checkpoints/base_ant_mjwarp_policy.pt",
         help="Path to a pretrained MJWarp Ant PPO checkpoint used when --mjwarp-ppo-init-mode=base.",
     )
     parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)

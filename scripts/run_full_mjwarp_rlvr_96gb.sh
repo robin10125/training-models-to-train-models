@@ -16,14 +16,15 @@ WORLDS_PER_CANDIDATE="${WORLDS_PER_CANDIDATE:-4096}"
 MJWARP_EVALUATOR="${MJWARP_EVALUATOR:-ppo}"
 MJWARP_EPISODE_STEPS="${MJWARP_EPISODE_STEPS:-500}"
 MJWARP_TRAINING_EPISODE_HORIZON="${MJWARP_TRAINING_EPISODE_HORIZON:-1000}"
-MJWARP_POLICY_ITERATIONS="${MJWARP_POLICY_ITERATIONS:-96}"
+MJWARP_POLICY_ITERATIONS="${MJWARP_POLICY_ITERATIONS:-32}"
 MJWARP_PPO_HORIZON="${MJWARP_PPO_HORIZON:-32}"
 MJWARP_PPO_EPOCHS="${MJWARP_PPO_EPOCHS:-4}"
 MJWARP_PPO_MINIBATCH_SIZE="${MJWARP_PPO_MINIBATCH_SIZE:-16384}"
 MJWARP_PPO_LEARNING_RATE="${MJWARP_PPO_LEARNING_RATE:-3e-4}"
-MJWARP_PPO_INIT_MODE="${MJWARP_PPO_INIT_MODE:-scratch}"
+MJWARP_PPO_INIT_MODE="${MJWARP_PPO_INIT_MODE:-base}"
 MJWARP_BASE_POLICY_CHECKPOINT="${MJWARP_BASE_POLICY_CHECKPOINT:-$RUN_ROOT/base_ant_mjwarp_policy.pt}"
-PRETRAIN_BASE_POLICY="${PRETRAIN_BASE_POLICY:-0}"
+MJWARP_BASE_POLICY_ITERATIONS="${MJWARP_BASE_POLICY_ITERATIONS:-96}"
+PRETRAIN_BASE_POLICY="${PRETRAIN_BASE_POLICY:-1}"
 FORCE_PRETRAIN_BASE_POLICY="${FORCE_PRETRAIN_BASE_POLICY:-0}"
 MJWARP_ELITE_FRAC="${MJWARP_ELITE_FRAC:-0.1}"
 MJWARP_ROLLOUT_MODE="${MJWARP_ROLLOUT_MODE:-gpu}"
@@ -67,19 +68,22 @@ Options:
   --mjwarp-training-episode-horizon N
                               Max steps before a training world resets. Default: 1000.
   --mjwarp-policy-iterations N
-                              Policy iterations per candidate. Default: 96.
+                              Policy iterations per candidate. Default: 32 with warm start.
   --mjwarp-ppo-horizon N      PPO rollout horizon before each update.
   --mjwarp-ppo-epochs N       PPO optimization epochs per rollout batch.
   --mjwarp-ppo-minibatch-size N
                               PPO minibatch size.
   --mjwarp-ppo-learning-rate X
                               PPO learning rate.
-  --mjwarp-ppo-init-mode NAME scratch or base. Default: scratch.
+  --mjwarp-ppo-init-mode NAME base or scratch. Default: base.
   --mjwarp-base-policy-checkpoint PATH
                               Base policy checkpoint for init mode base.
+  --mjwarp-base-policy-iterations N
+                              PPO iterations used to pretrain the base policy. Default: 96.
   --pretrain-base-policy      Train the base policy before running RLVR if needed.
   --force-pretrain-base-policy
                               Retrain the base policy even if the checkpoint exists.
+  --cold-start                Use scratch PPO initialization and 96 policy iterations.
   --mjwarp-rollout-mode NAME  gpu or host. Default: gpu.
   --mjwarp-verified-evaluator NAME
                               mjwarp or gym. Default: mjwarp.
@@ -172,12 +176,22 @@ while [[ $# -gt 0 ]]; do
       MJWARP_BASE_POLICY_CHECKPOINT="$2"
       shift 2
       ;;
+    --mjwarp-base-policy-iterations)
+      MJWARP_BASE_POLICY_ITERATIONS="$2"
+      shift 2
+      ;;
     --pretrain-base-policy)
       PRETRAIN_BASE_POLICY=1
       shift
       ;;
     --force-pretrain-base-policy)
       FORCE_PRETRAIN_BASE_POLICY=1
+      shift
+      ;;
+    --cold-start)
+      MJWARP_PPO_INIT_MODE=scratch
+      PRETRAIN_BASE_POLICY=0
+      MJWARP_POLICY_ITERATIONS=96
       shift
       ;;
     --mjwarp-rollout-mode)
@@ -352,7 +366,7 @@ EOF
   exit 1
 fi
 
-if [[ "$PRETRAIN_BASE_POLICY" == "1" ]]; then
+if [[ "$MJWARP_PPO_INIT_MODE" == "base" && "$PRETRAIN_BASE_POLICY" == "1" ]]; then
   if [[ ! -f "$MJWARP_BASE_POLICY_CHECKPOINT" || "$FORCE_PRETRAIN_BASE_POLICY" == "1" ]]; then
     log "Pretraining MJWarp Ant base PPO policy"
     "$PY" -m eureka_lite.pretrain_mjwarp_ant_policy \
@@ -361,7 +375,7 @@ if [[ "$PRETRAIN_BASE_POLICY" == "1" ]]; then
       --mjwarp-evaluator "$MJWARP_EVALUATOR" \
       --mjwarp-episode-steps "$MJWARP_EPISODE_STEPS" \
       --mjwarp-training-episode-horizon "$MJWARP_TRAINING_EPISODE_HORIZON" \
-      --mjwarp-policy-iterations "$MJWARP_POLICY_ITERATIONS" \
+      --mjwarp-policy-iterations "$MJWARP_BASE_POLICY_ITERATIONS" \
       --mjwarp-ppo-horizon "$MJWARP_PPO_HORIZON" \
       --mjwarp-ppo-epochs "$MJWARP_PPO_EPOCHS" \
       --mjwarp-ppo-minibatch-size "$MJWARP_PPO_MINIBATCH_SIZE" \

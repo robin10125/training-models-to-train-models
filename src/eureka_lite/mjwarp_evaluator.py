@@ -50,8 +50,8 @@ class MjwarpEvaluatorConfig:
     elite_frac: float = 0.1
     init_std: float = 0.35
     min_std: float = 0.03
-    ppo_init_mode: str = "scratch"
-    base_policy_checkpoint: str | None = None
+    ppo_init_mode: str = "base"
+    base_policy_checkpoint: str | None = "checkpoints/base_ant_mjwarp_policy.pt"
     seed: int = 7
     device: str = "cuda:0"
     eval_episodes: int = 5
@@ -472,8 +472,6 @@ def pretrain_original_reward_policy(config: MjwarpEvaluatorConfig, output_path: 
         raise ValueError("The MJWarp base-policy pretrainer currently supports only Ant-v5")
     if config.evaluator != "ppo":
         raise ValueError("Base-policy pretraining requires evaluator='ppo'")
-    if config.ppo_init_mode != "scratch":
-        config = dataclass_replace(config, ppo_init_mode="scratch", base_policy_checkpoint=None)
     validate_ppo_init_config(config)
     validate_reward_backend(config.reward_backend)
     validate_verification_audit_config(config)
@@ -774,6 +772,15 @@ def seed_torch_policy_rng(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def initialize_policy_std(policy: Any, init_std: float) -> None:
+    import torch
+
+    if init_std <= 0.0:
+        raise ValueError("init_std must be positive")
+    with torch.no_grad():
+        policy.log_std.fill_(math.log(init_std))
+
+
 def load_base_policy_checkpoint(path: str | Path, *, map_location: Any = "cpu") -> dict[str, Any]:
     import torch
 
@@ -895,6 +902,7 @@ def train_ppo_policy_host(
 
     torch_device = torch.device("cuda" if config.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
     policy = AntActorCritic(obs_dim, action_dim).to(torch_device)
+    initialize_policy_std(policy, config.init_std)
     maybe_initialize_policy_from_base(
         policy,
         config,
@@ -1041,6 +1049,7 @@ def train_ppo_policy_gpu(
 
     torch_device = torch.device("cuda" if config.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
     policy = AntActorCritic(obs_dim, action_dim).to(torch_device)
+    initialize_policy_std(policy, config.init_std)
     maybe_initialize_policy_from_base(
         policy,
         config,
@@ -1207,6 +1216,7 @@ def train_ppo_policy_gpu_batch(
     torch_device = torch.device("cuda" if config.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
     seed_torch_policy_rng(config.seed)
     policy = BatchedAntActorCritic(candidate_count, obs_dim, action_dim).to(torch_device)
+    initialize_policy_std(policy, config.init_std)
     maybe_initialize_policy_from_base(
         policy,
         config,
@@ -1927,7 +1937,7 @@ class AntActorCritic:
                 dist = self.distribution(obs)
                 raw_action = dist.rsample()
                 action = torch.tanh(raw_action)
-                logprob = dist.log_prob(raw_action).sum(dim=-1)
+                logprob = self.squashed_log_prob(dist.log_prob(raw_action), action)
                 entropy = dist.entropy().sum(dim=-1)
                 value = self.value(obs)
                 return action, logprob, entropy, value
@@ -1936,10 +1946,15 @@ class AntActorCritic:
                 clipped = action.clamp(-0.999, 0.999)
                 raw_action = torch.atanh(clipped)
                 dist = self.distribution(obs)
-                logprob = dist.log_prob(raw_action).sum(dim=-1)
+                logprob = self.squashed_log_prob(dist.log_prob(raw_action), clipped)
                 entropy = dist.entropy().sum(dim=-1)
                 value = self.value(obs)
                 return logprob, entropy, value
+
+            @staticmethod
+            def squashed_log_prob(raw_log_prob: Any, action: Any) -> Any:
+                correction = torch.log1p(-action.square() + 1.0e-6)
+                return (raw_log_prob - correction).sum(dim=-1)
 
             def value(self, obs: Any) -> Any:
                 _mean, value = self.forward(obs)
@@ -1991,11 +2006,12 @@ class BatchedAntActorCritic:
                 std = self.log_std.exp()[:, None, :]
                 raw_action = mean + std * noise
                 action = torch.tanh(raw_action)
-                logprob = (
+                raw_logprob = (
                     -0.5 * ((raw_action - mean) / std).square()
                     - self.log_std[:, None, :]
                     - 0.5 * math.log(2.0 * math.pi)
-                ).sum(dim=-1)
+                )
+                logprob = self.squashed_log_prob(raw_logprob, action)
                 entropy = (
                     self.log_std[:, None, :] + 0.5 * (1.0 + math.log(2.0 * math.pi))
                 ).expand_as(raw_action).sum(dim=-1)
@@ -2004,16 +2020,23 @@ class BatchedAntActorCritic:
             def evaluate_actions(self, obs: Any, action: Any) -> tuple[Any, Any, Any]:
                 mean, value = self.forward(obs)
                 std = self.log_std.exp()[:, None, :]
-                raw_action = torch.atanh(action.clamp(-0.999, 0.999))
-                logprob = (
+                clipped = action.clamp(-0.999, 0.999)
+                raw_action = torch.atanh(clipped)
+                raw_logprob = (
                     -0.5 * ((raw_action - mean) / std).square()
                     - self.log_std[:, None, :]
                     - 0.5 * math.log(2.0 * math.pi)
-                ).sum(dim=-1)
+                )
+                logprob = self.squashed_log_prob(raw_logprob, clipped)
                 entropy = (
                     self.log_std[:, None, :] + 0.5 * (1.0 + math.log(2.0 * math.pi))
                 ).expand_as(raw_action).sum(dim=-1)
                 return logprob, entropy, value
+
+            @staticmethod
+            def squashed_log_prob(raw_log_prob: Any, action: Any) -> Any:
+                correction = torch.log1p(-action.square() + 1.0e-6)
+                return (raw_log_prob - correction).sum(dim=-1)
 
             def value(self, obs: Any) -> Any:
                 _mean, value = self.forward(obs)

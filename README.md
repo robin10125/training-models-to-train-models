@@ -68,7 +68,10 @@ verify setup, checkpointing, generation, evaluation, and RLVR training.
 
 ## RTX PRO 6000 Blackwell Serious Run
 
-Use this for the full RTX PRO 6000 Blackwell 96 GB experiment from scratch:
+Use this for the default RTX PRO 6000 Blackwell 96 GB experiment. The default
+run uses a warm-started PPO policy: the script pretrains one original-reward
+MJWarp Ant base policy, reuses it if it already exists, and fine-tunes each
+reward candidate from that checkpoint.
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
@@ -82,21 +85,19 @@ Defaults for this command:
 - `3` EUREKA generations per RLVR iteration
 - `4` elites carried into refinement prompts
 - `4096` MJWarp Ant worlds per candidate
-- `96` PPO policy iterations per candidate
+- one shared original-reward base Ant policy pretrained for `96` PPO iterations
+- `32` PPO fine-tuning iterations per candidate
 - MJWarp verified return as the RLVR reward
 - GRPO LoRA updates after each collection iteration
 
-Use the warm-start version when you want the faster RTX PRO 6000 Blackwell path.
-It pretrains one original-reward MJWarp Ant PPO policy, then initializes every
-candidate from that checkpoint and uses a shorter candidate fine-tuning budget:
+Use this for the cold-start reference path. It trains every reward candidate
+from seeded random PPO initialization with the full `96`-iteration budget:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
-  --run-root runs/deepseek_lite_ant_mjwarp_rlvr_base \
+  --run-root runs/deepseek_lite_ant_mjwarp_rlvr_cold \
   --iterations 20 \
-  --pretrain-base-policy \
-  --mjwarp-ppo-init-mode base \
-  --mjwarp-policy-iterations 32
+  --cold-start
 ```
 
 To reuse an existing base-policy checkpoint:
@@ -105,14 +106,17 @@ To reuse an existing base-policy checkpoint:
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
   --run-root runs/deepseek_lite_ant_mjwarp_rlvr_base \
   --iterations 20 \
-  --mjwarp-ppo-init-mode base \
   --mjwarp-base-policy-checkpoint runs/deepseek_lite_ant_mjwarp_rlvr_base/base_ant_mjwarp_policy.pt \
   --mjwarp-policy-iterations 32
 ```
 
 The warm-start path is faster, but it changes the inner question from training
 Ant from scratch to fine-tuning a competent Ant policy. Use the from-scratch
-command for reference runs.
+command for reference runs. The equivalent explicit cold-start flags are:
+
+```bash
+--mjwarp-ppo-init-mode scratch --mjwarp-policy-iterations 96
+```
 
 To measure transfer to Gym `Ant-v5` as a diagnostic, add:
 

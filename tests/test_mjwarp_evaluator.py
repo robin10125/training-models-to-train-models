@@ -27,6 +27,7 @@ from eureka_lite.mjwarp_evaluator import (
     seed_torch_policy_rng,
     load_base_policy_into_batched,
     load_base_policy_into_single,
+    initialize_policy_std,
     train_and_evaluate_mjwarp,
     validate_ppo_init_config,
 )
@@ -250,6 +251,27 @@ class MjwarpEvaluatorTests(unittest.TestCase):
         self.assertTrue(torch.equal(logprobs[0], logprobs[1]))
         self.assertTrue(torch.equal(values[0], values[1]))
 
+    def test_initialize_policy_std_sets_log_std(self) -> None:
+        import math
+        import torch
+
+        policy = AntActorCritic(4, 2)
+        initialize_policy_std(policy, 0.35)
+        self.assertTrue(torch.allclose(policy.log_std, torch.full((2,), math.log(0.35))))
+        batched = BatchedAntActorCritic(3, 4, 2)
+        initialize_policy_std(batched, 0.25)
+        self.assertTrue(torch.allclose(batched.log_std, torch.full((3, 2), math.log(0.25))))
+
+    def test_squashed_logprob_matches_between_act_and_evaluate(self) -> None:
+        import torch
+
+        seed_torch_policy_rng(23)
+        policy = AntActorCritic(4, 2)
+        obs = torch.randn(5, 4)
+        action, logprob, _entropy, _value = policy.act(obs)
+        evaluated_logprob, _evaluated_entropy, _evaluated_value = policy.evaluate_actions(obs, action)
+        self.assertTrue(torch.allclose(logprob, evaluated_logprob, atol=1e-5))
+
     def test_base_policy_checkpoint_loads_single_policy(self) -> None:
         import torch
 
@@ -303,7 +325,7 @@ class MjwarpEvaluatorTests(unittest.TestCase):
 
     def test_base_init_requires_checkpoint_path(self) -> None:
         with self.assertRaisesRegex(ValueError, "base_policy_checkpoint"):
-            validate_ppo_init_config(MjwarpEvaluatorConfig(ppo_init_mode="base"))
+            validate_ppo_init_config(MjwarpEvaluatorConfig(ppo_init_mode="base", base_policy_checkpoint=None))
 
     def test_rejects_non_ant_task_before_importing_mjwarp(self) -> None:
         candidate = RewardCandidate(
