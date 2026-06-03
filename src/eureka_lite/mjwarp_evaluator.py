@@ -38,8 +38,10 @@ class MjwarpEvaluatorConfig:
     ppo_gae_lambda: float = 0.95
     ppo_clip: float = 0.2
     ppo_value_coef: float = 2.0
-    ppo_entropy_coef: float = 0.0
+    ppo_entropy_coef: float = 1.0e-3
     ppo_max_grad_norm: float = 1.0
+    ppo_target_kl: float | None = 0.03
+    ppo_value_clip: float = 0.2
     rollout_mode: str = "gpu"
     verified_evaluator: str = "mjwarp"
     verification_steps: int = 1000
@@ -50,6 +52,8 @@ class MjwarpEvaluatorConfig:
     elite_frac: float = 0.1
     init_std: float = 0.35
     min_std: float = 0.03
+    normalize_observations: bool = True
+    obs_norm_eps: float = 1.0e-5
     ppo_init_mode: str = "base"
     base_policy_checkpoint: str | None = "checkpoints/base_ant_mjwarp_policy.pt"
     seed: int = 7
@@ -106,6 +110,33 @@ def read_base_policy_checkpoint_metadata(path: str | Path) -> dict[str, Any]:
     checkpoint = load_base_policy_checkpoint(path, map_location="cpu")
     metadata = checkpoint.get("metadata", {})
     return metadata if isinstance(metadata, dict) else {}
+
+
+class RunningMeanStd:
+    def __init__(self, *, shape: tuple[int, ...], epsilon: float = 1.0e-4) -> None:
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.var = np.ones(shape, dtype=np.float64)
+        self.count = float(epsilon)
+
+    def update(self, values: np.ndarray) -> None:
+        array = np.asarray(values, dtype=np.float64)
+        if array.ndim == len(self.mean.shape):
+            array = array.reshape(1, *array.shape)
+        batch_mean = array.mean(axis=0)
+        batch_var = array.var(axis=0)
+        batch_count = float(array.shape[0])
+        self._update_from_moments(batch_mean, batch_var, batch_count)
+
+    def _update_from_moments(self, batch_mean: np.ndarray, batch_var: np.ndarray, batch_count: float) -> None:
+        delta = batch_mean - self.mean
+        total_count = self.count + batch_count
+        new_mean = self.mean + delta * batch_count / total_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + np.square(delta) * self.count * batch_count / total_count
+        self.mean = new_mean
+        self.var = m2 / total_count
+        self.count = total_count
 
 
 def build_verification_audit(
@@ -939,6 +970,8 @@ def train_ppo_policy_host(
                 qvel_before = np.asarray(data.qvel.numpy(), dtype=np.float32)
                 obs_np = ant_policy_obs(qpos_before, qvel_before)
                 obs = torch.as_tensor(obs_np, dtype=torch.float32, device=torch_device)
+                if config.normalize_observations:
+                    policy.update_obs_stats(obs)
                 with torch.no_grad():
                     action_t, logprob_t, _, value_t = policy.act(obs)
                 action = action_t.detach().cpu().numpy().astype(np.float32)
@@ -991,6 +1024,7 @@ def train_ppo_policy_host(
             flat_obs = torch.as_tensor(np.asarray(batch_obs, dtype=np.float32).reshape(-1, obs_dim), device=torch_device)
             flat_actions = torch.as_tensor(np.asarray(batch_actions, dtype=np.float32).reshape(-1, action_dim), device=torch_device)
             flat_old_logprobs = torch.as_tensor(np.asarray(batch_logprobs, dtype=np.float32).reshape(-1), device=torch_device)
+            flat_old_values = torch.as_tensor(np.asarray(batch_values, dtype=np.float32).reshape(-1), device=torch_device)
             flat_advantages = torch.as_tensor(advantages.reshape(-1), dtype=torch.float32, device=torch_device)
             flat_returns = torch.as_tensor(returns.reshape(-1), dtype=torch.float32, device=torch_device)
             flat_advantages = (flat_advantages - flat_advantages.mean()) / flat_advantages.std().clamp_min(1e-6)
@@ -1001,6 +1035,7 @@ def train_ppo_policy_host(
                 obs=flat_obs,
                 actions=flat_actions,
                 old_logprobs=flat_old_logprobs,
+                old_values=flat_old_values,
                 advantages=flat_advantages,
                 returns=flat_returns,
                 config=config,
@@ -1110,6 +1145,8 @@ def train_ppo_policy_gpu(
 
                 for step in range(rollout_steps):
                     obs = ant_policy_obs_torch(qpos, qvel)
+                    if config.normalize_observations:
+                        policy.update_obs_stats(obs)
                     qpos_xy_before = qpos[:, :2].clone()
                     with torch.no_grad():
                         action, logprob, _, value = policy.act(obs)
@@ -1162,6 +1199,7 @@ def train_ppo_policy_gpu(
                 flat_obs = batch_obs.reshape(-1, obs_dim)
                 flat_actions = batch_actions.reshape(-1, action_dim)
                 flat_old_logprobs = batch_logprobs.reshape(-1)
+                flat_old_values = batch_values.reshape(-1)
                 flat_advantages = advantages.reshape(-1)
                 flat_returns = returns.reshape(-1)
                 flat_advantages = (flat_advantages - flat_advantages.mean()) / flat_advantages.std().clamp_min(1e-6)
@@ -1172,6 +1210,7 @@ def train_ppo_policy_gpu(
                     obs=flat_obs,
                     actions=flat_actions,
                     old_logprobs=flat_old_logprobs,
+                    old_values=flat_old_values,
                     advantages=flat_advantages,
                     returns=flat_returns,
                     config=config,
@@ -1281,6 +1320,8 @@ def train_ppo_policy_gpu_batch(
 
                 for step in range(rollout_steps):
                     obs = ant_policy_obs_torch_batched(qpos, qvel)
+                    if config.normalize_observations:
+                        policy.update_obs_stats(obs)
                     qpos_xy_before = qpos[:, :, :2].clone()
                     shared_noise = torch.randn((1, worlds, action_dim), dtype=torch.float32, device=torch_device)
                     shared_noise = shared_noise.expand(candidate_count, -1, -1)
@@ -1344,6 +1385,7 @@ def train_ppo_policy_gpu_batch(
                 flat_obs = batch_obs.permute(1, 0, 2, 3).reshape(candidate_count, -1, obs_dim)
                 flat_actions = batch_actions.permute(1, 0, 2, 3).reshape(candidate_count, -1, action_dim)
                 flat_logprobs = batch_logprobs.permute(1, 0, 2).reshape(candidate_count, -1)
+                flat_old_values = batch_values.permute(1, 0, 2).reshape(candidate_count, -1)
                 flat_advantages = advantages.permute(1, 0, 2).reshape(candidate_count, -1)
                 flat_returns = returns.permute(1, 0, 2).reshape(candidate_count, -1)
                 means = flat_advantages.mean(dim=1, keepdim=True)
@@ -1355,6 +1397,7 @@ def train_ppo_policy_gpu_batch(
                     obs=flat_obs,
                     actions=flat_actions,
                     old_logprobs=flat_logprobs,
+                    old_values=flat_old_values,
                     advantages=flat_advantages,
                     returns=flat_returns,
                     config=config,
@@ -1506,6 +1549,7 @@ def ppo_update(
     obs: Any,
     actions: Any,
     old_logprobs: Any,
+    old_values: Any,
     advantages: Any,
     returns: Any,
     config: MjwarpEvaluatorConfig,
@@ -1524,13 +1568,24 @@ def ppo_update(
             unclipped = ratio * advantages[idx]
             clipped = torch.clamp(ratio, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip) * advantages[idx]
             policy_loss = -torch.min(unclipped, clipped).mean()
-            value_loss = 0.5 * (returns[idx] - value).square().mean()
+            value_delta = value - old_values[idx]
+            value_clipped = old_values[idx] + torch.clamp(
+                value_delta, -config.ppo_value_clip, config.ppo_value_clip
+            )
+            value_loss_unclipped = (returns[idx] - value).square()
+            value_loss_clipped = (returns[idx] - value_clipped).square()
+            value_loss = 0.5 * torch.maximum(value_loss_unclipped, value_loss_clipped).mean()
             entropy_loss = entropy.mean()
             loss = policy_loss + config.ppo_value_coef * value_loss - config.ppo_entropy_coef * entropy_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), config.ppo_max_grad_norm)
             optimizer.step()
+            enforce_min_std(policy, config.min_std)
+            if config.ppo_target_kl is not None:
+                approx_kl = ((ratio - 1.0) - logratio).mean()
+                if float(approx_kl.detach().cpu()) > config.ppo_target_kl:
+                    return
 
 
 def ppo_update_batched(
@@ -1540,6 +1595,7 @@ def ppo_update_batched(
     obs: Any,
     actions: Any,
     old_logprobs: Any,
+    old_values: Any,
     advantages: Any,
     returns: Any,
     config: MjwarpEvaluatorConfig,
@@ -1558,13 +1614,33 @@ def ppo_update_batched(
             unclipped = ratio * advantages[:, idx]
             clipped = torch.clamp(ratio, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip) * advantages[:, idx]
             policy_loss = -torch.min(unclipped, clipped).mean(dim=1)
-            value_loss = 0.5 * (returns[:, idx] - value).square().mean(dim=1)
+            value_delta = value - old_values[:, idx]
+            value_clipped = old_values[:, idx] + torch.clamp(
+                value_delta, -config.ppo_value_clip, config.ppo_value_clip
+            )
+            value_loss_unclipped = (returns[:, idx] - value).square()
+            value_loss_clipped = (returns[:, idx] - value_clipped).square()
+            value_loss = 0.5 * torch.maximum(value_loss_unclipped, value_loss_clipped).mean(dim=1)
             entropy_loss = entropy.mean(dim=1)
             loss = (policy_loss + config.ppo_value_coef * value_loss - config.ppo_entropy_coef * entropy_loss).sum()
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             clip_grad_norm_per_candidate_(policy.parameters(), config.ppo_max_grad_norm, candidate_count)
             optimizer.step()
+            enforce_min_std(policy, config.min_std)
+            if config.ppo_target_kl is not None:
+                logratio = new_logprob - old_logprobs[:, idx]
+                approx_kl = ((ratio - 1.0) - logratio).mean(dim=1)
+                if float(approx_kl.max().detach().cpu()) > config.ppo_target_kl:
+                    return
+
+
+def enforce_min_std(policy: Any, min_std: float) -> None:
+    import torch
+
+    min_log_std = math.log(min_std)
+    with torch.no_grad():
+        policy.log_std.clamp_(min=min_log_std)
 
 
 def clip_grad_norm_per_candidate_(
@@ -1923,10 +1999,33 @@ class AntActorCritic:
                 self.actor_mean = torch.nn.Linear(last_dim, action_dim)
                 self.critic = torch.nn.Linear(last_dim, 1)
                 self.log_std = torch.nn.Parameter(torch.zeros(action_dim))
+                self.register_buffer("obs_mean", torch.zeros(obs_dim))
+                self.register_buffer("obs_var", torch.ones(obs_dim))
+                self.register_buffer("obs_count", torch.full((), 1.0e-4))
 
             def forward(self, obs: Any) -> tuple[Any, Any]:
-                features = self.backbone(obs)
+                features = self.backbone(self.normalize_obs(obs))
                 return self.actor_mean(features), self.critic(features).squeeze(-1)
+
+            def normalize_obs(self, obs: Any) -> Any:
+                return (obs - self.obs_mean) / torch.sqrt(self.obs_var + 1.0e-5)
+
+            def update_obs_stats(self, obs: Any) -> None:
+                batch_mean = obs.mean(dim=0)
+                batch_var = obs.var(dim=0, unbiased=False)
+                batch_count = float(obs.shape[0])
+                self._update_obs_stats_from_moments(batch_mean, batch_var, batch_count)
+
+            def _update_obs_stats_from_moments(self, batch_mean: Any, batch_var: Any, batch_count: float) -> None:
+                total_count = self.obs_count + batch_count
+                delta = batch_mean - self.obs_mean
+                new_mean = self.obs_mean + delta * batch_count / total_count
+                m_a = self.obs_var * self.obs_count
+                m_b = batch_var * batch_count
+                m2 = m_a + m_b + delta.square() * self.obs_count * batch_count / total_count
+                self.obs_mean.copy_(new_mean)
+                self.obs_var.copy_(m2 / total_count)
+                self.obs_count.fill_(float(total_count))
 
             def distribution(self, obs: Any) -> Any:
                 mean, _value = self.forward(obs)
@@ -1989,6 +2088,9 @@ class BatchedAntActorCritic:
                         torch.nn.Parameter(layer.bias.detach().unsqueeze(0).repeat(candidate_count, 1)),
                     )
                 self.log_std = torch.nn.Parameter(base.log_std.detach().unsqueeze(0).repeat(candidate_count, 1))
+                self.register_buffer("obs_mean", torch.zeros(candidate_count, obs_dim))
+                self.register_buffer("obs_var", torch.ones(candidate_count, obs_dim))
+                self.register_buffer("obs_count", torch.full((candidate_count, 1), 1.0e-4))
 
             def linear(self, values: Any, index: int) -> Any:
                 weights = getattr(self, f"weight_{index}")
@@ -1996,10 +2098,31 @@ class BatchedAntActorCritic:
                 return torch.einsum("cni,coi->cno", values, weights) + biases[:, None, :]
 
             def forward(self, obs: Any) -> tuple[Any, Any]:
+                obs = self.normalize_obs(obs)
                 features = functional.elu(self.linear(obs, 0))
                 features = functional.elu(self.linear(features, 1))
                 features = functional.elu(self.linear(features, 2))
                 return self.linear(features, 3), self.linear(features, 4).squeeze(-1)
+
+            def normalize_obs(self, obs: Any) -> Any:
+                return (obs - self.obs_mean[:, None, :]) / torch.sqrt(self.obs_var[:, None, :] + 1.0e-5)
+
+            def update_obs_stats(self, obs: Any) -> None:
+                batch_mean = obs.mean(dim=1)
+                batch_var = obs.var(dim=1, unbiased=False)
+                batch_count = float(obs.shape[1])
+                self._update_obs_stats_from_moments(batch_mean, batch_var, batch_count)
+
+            def _update_obs_stats_from_moments(self, batch_mean: Any, batch_var: Any, batch_count: float) -> None:
+                total_count = self.obs_count + batch_count
+                delta = batch_mean - self.obs_mean
+                new_mean = self.obs_mean + delta * batch_count / total_count
+                m_a = self.obs_var * self.obs_count
+                m_b = batch_var * batch_count
+                m2 = m_a + m_b + delta.square() * self.obs_count * batch_count / total_count
+                self.obs_mean.copy_(new_mean)
+                self.obs_var.copy_(m2 / total_count)
+                self.obs_count.fill_(float(total_count))
 
             def act(self, obs: Any, noise: Any) -> tuple[Any, Any, Any, Any]:
                 mean, value = self.forward(obs)
