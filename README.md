@@ -69,14 +69,12 @@ verify setup, checkpointing, generation, evaluation, and RLVR training.
 ## RTX PRO 6000 Blackwell Serious Run
 
 Use this for the default RTX PRO 6000 Blackwell 96 GB experiment. The default
-run uses a warm-started PPO policy: the script pretrains one original-reward
-MJWarp Ant base policy, reuses it if it already exists, and fine-tunes each
-reward candidate from that checkpoint.
+run uses the saved `1500`-gate MJWarp Ant warm-start policy at
+`checkpoints/ant_mjwarp_warm_start_1500.pt` and fine-tunes each reward
+candidate from that checkpoint.
 
 ```bash
-./scripts/run_full_mjwarp_rlvr_96gb.sh \
-  --run-root runs/deepseek_lite_ant_mjwarp_rlvr \
-  --iterations 20
+./scripts/run_full_mjwarp_rlvr_96gb.sh
 ```
 
 Defaults for this command:
@@ -85,9 +83,12 @@ Defaults for this command:
 - `3` EUREKA generations per RLVR iteration
 - `4` elites carried into refinement prompts
 - `4096` MJWarp Ant worlds per candidate
-- one shared original-reward base Ant policy pretrained for `96` PPO iterations
+- one shared early-locomotion Ant warm-start policy with verified mean return
+  about `1724`
 - `32` PPO fine-tuning iterations per candidate
-- MJWarp verified return as the RLVR reward
+- conservative MJWarp verified score as the RLVR reward:
+  `mean_return - 0.25 * std_return`
+- `32` common-seed verification episodes for serious ranking
 - GRPO LoRA updates after each collection iteration
 
 Use this for the cold-start reference path. It trains every reward candidate
@@ -96,7 +97,6 @@ from seeded random PPO initialization with the full `96`-iteration budget:
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
   --run-root runs/deepseek_lite_ant_mjwarp_rlvr_cold \
-  --iterations 20 \
   --cold-start
 ```
 
@@ -105,8 +105,7 @@ To reuse an existing base-policy checkpoint:
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
   --run-root runs/deepseek_lite_ant_mjwarp_rlvr_base \
-  --iterations 20 \
-  --mjwarp-base-policy-checkpoint runs/deepseek_lite_ant_mjwarp_rlvr_base/base_ant_mjwarp_policy.pt \
+  --mjwarp-base-policy-checkpoint checkpoints/ant_mjwarp_warm_start_1500.pt \
   --mjwarp-policy-iterations 32
 ```
 
@@ -171,7 +170,7 @@ Resume:
 
 ```bash
 rm runs/deepseek_lite_ant_mjwarp_rlvr/PAUSE
-./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20
+./scripts/run_full_mjwarp_rlvr_96gb.sh
 ```
 
 For the smoke test, use its run root:

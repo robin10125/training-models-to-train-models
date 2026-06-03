@@ -22,7 +22,8 @@ def write_results(output_dir: Path, results: list[CandidateResult]) -> None:
         (output_dir / "best_reward.py").write_text(
             "# Best discovered reward expression\n"
             f"REWARD_EXPRESSION = {best['candidate']['expression']!r}\n"
-            f"MEAN_REWARD = {best['mean_reward']!r}\n",
+            f"MEAN_REWARD = {best['mean_reward']!r}\n"
+            f"VERIFIED_SCORE = {best.get('verified_score')!r}\n",
             encoding="utf-8",
         )
 
@@ -51,11 +52,20 @@ def to_rlvr_record(result: CandidateResult) -> dict[str, object]:
         "train_reward_expression": None if result.status == "invalid_completion" else candidate.expression,
         "reward_components": candidate.component_expressions,
         "verified_reward": result.mean_reward,
+        "verified_score": result.verified_score,
         "verified_reward_std": result.std_reward,
         "verified_reward_episodes": result.episode_rewards,
         "verified_reward_type": result.verified_reward_type,
-        "rlvr_reward": result.mean_reward if result.rlvr_reward is None else result.rlvr_reward,
-        "rlvr_reward_type": result.verified_reward_type if result.rlvr_reward_type is None else result.rlvr_reward_type,
+        "rlvr_reward": result.verified_score
+        if result.rlvr_reward is None and result.verified_score is not None
+        else result.mean_reward
+        if result.rlvr_reward is None
+        else result.rlvr_reward,
+        "rlvr_reward_type": "conservative_verified_return"
+        if result.rlvr_reward_type is None and result.verified_score is not None
+        else result.verified_reward_type
+        if result.rlvr_reward_type is None
+        else result.rlvr_reward_type,
         "seed": result.seed,
         "timesteps": result.timesteps,
         "status": result.status,
@@ -249,6 +259,7 @@ def candidate_result_from_dict(row: dict[str, Any]) -> CandidateResult:
         error=row.get("error"),
         elapsed_seconds=row.get("elapsed_seconds"),
         metadata=row.get("metadata"),
+        verified_score=row.get("verified_score"),
     )
 
 

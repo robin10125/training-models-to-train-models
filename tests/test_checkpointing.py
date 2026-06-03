@@ -24,6 +24,7 @@ from eureka_lite.search import (
     to_rlvr_record,
     verified_reward_type_for_evaluator,
 )
+from eureka_lite.search_feedback import result_sort_key
 
 
 class CheckpointingTests(unittest.TestCase):
@@ -128,6 +129,38 @@ class CheckpointingTests(unittest.TestCase):
         self.assertEqual(record["status"], "failed")
         self.assertEqual(record["error"], "boom")
         self.assertEqual(record["elapsed_seconds"], 1.0)
+
+    def test_conservative_score_drives_ranking_and_rlvr_reward(self) -> None:
+        candidate = initial_population("Ant-v5", 1, __import__("random").Random(7))[0]
+        stable = CandidateResult(
+            candidate=candidate,
+            mean_reward=100.0,
+            std_reward=10.0,
+            verified_score=97.5,
+            episode_rewards=[90.0, 110.0],
+            timesteps=1,
+            seed=7,
+            task="Ant-v5",
+            metadata={"verified_score": 97.5},
+        )
+        noisy = CandidateResult(
+            candidate=candidate,
+            mean_reward=105.0,
+            std_reward=80.0,
+            verified_score=85.0,
+            episode_rewards=[25.0, 185.0],
+            timesteps=1,
+            seed=8,
+            task="Ant-v5",
+            metadata={"verified_score": 85.0},
+        )
+        restored = candidate_result_from_dict(candidate_result_to_dict(stable))
+        record = to_rlvr_record(restored)
+
+        self.assertGreater(result_sort_key(stable), result_sort_key(noisy))
+        self.assertEqual(restored.verified_score, 97.5)
+        self.assertEqual(record["rlvr_reward"], 97.5)
+        self.assertEqual(record["rlvr_reward_type"], "conservative_verified_return")
 
     def test_failed_and_invalid_candidates_receive_separate_rlvr_penalties(self) -> None:
         candidate = initial_population("Ant-v5", 1, __import__("random").Random(7))[0]

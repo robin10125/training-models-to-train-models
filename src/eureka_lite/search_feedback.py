@@ -7,8 +7,20 @@ import numpy as np
 
 
 def result_sort_key(result: Any) -> float:
-    if result.mean_reward is None:
+    score = result_score(result)
+    if score is None:
         return float("-inf")
+    return score
+
+
+def result_score(result: Any) -> float | None:
+    if result.verified_score is not None:
+        return float(result.verified_score)
+    metadata = result.metadata or {}
+    if metadata.get("verified_score") is not None:
+        return float(metadata["verified_score"])
+    if result.rlvr_reward is not None and result.status == "success":
+        return float(result.rlvr_reward)
     return result.mean_reward
 
 
@@ -21,7 +33,9 @@ def elite_context_from_results(results: list[Any], elite_count: int) -> list[dic
             "rank": rank,
             "name": result.candidate.name,
             "expression": result.candidate.expression,
-            "score": result.mean_reward,
+            "score": result_score(result),
+            "mean_reward": result.mean_reward,
+            "std_reward": result.std_reward,
             "status": result.status,
             "verified_reward_type": result.verified_reward_type,
         }
@@ -49,9 +63,9 @@ def negative_reward_for_generation(results: list[Any], margin: float) -> float:
     if margin <= 0:
         raise ValueError("--negative-rlvr-margin must be greater than 0")
     successful_scores = [
-        result.mean_reward
+        result_score(result)
         for result in results
-        if result.status == "success" and result.mean_reward is not None
+        if result.status == "success" and result_score(result) is not None
     ]
     baseline = min(successful_scores) if successful_scores else 0.0
     return float(baseline) - margin
@@ -70,8 +84,8 @@ def format_generation_feedback(results: list[Any], elite_count: int) -> str:
     ranked = sorted(results, key=result_sort_key, reverse=True)
     elites = ranked[:elite_count]
     rejected = ranked[elite_count:]
-    successful_rewards = [result.mean_reward for result in ranked if result.mean_reward is not None]
-    lines = ["Ranked by verified target-environment return."]
+    successful_rewards = [result_score(result) for result in ranked if result_score(result) is not None]
+    lines = ["Ranked by conservative verified score: mean_return - 0.25 * std_return."]
     if successful_rewards:
         lines.append(
             "Verified return summary: "
@@ -93,10 +107,13 @@ def format_generation_feedback(results: list[Any], elite_count: int) -> str:
 
 
 def format_result_feedback_row(rank: int, result: Any, *, selected: bool) -> list[str]:
-    score = "n/a" if result.mean_reward is None else f"{result.mean_reward:.4f}"
+    score_value = result_score(result)
+    score = "n/a" if score_value is None else f"{score_value:.4f}"
+    mean = "n/a" if result.mean_reward is None else f"{result.mean_reward:.4f}"
+    std = "n/a" if result.std_reward is None else f"{result.std_reward:.4f}"
     prefix = "ELITE" if selected else "NON_ELITE"
     lines = [
-        f"{rank}. {prefix} name={result.candidate.name} status={result.status} verified_return={score}",
+        f"{rank}. {prefix} name={result.candidate.name} status={result.status} score={score} mean_return={mean} std={std}",
         f"   expression={result.candidate.expression}",
     ]
     metadata = result.metadata or {}

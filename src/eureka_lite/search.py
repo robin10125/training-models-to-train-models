@@ -34,6 +34,7 @@ from .search_feedback import (
     elite_context_from_results,
     format_generation_feedback,
     negative_reward_for_generation,
+    result_score,
     result_sort_key,
 )
 from .search_state import GenerationPhase, GenerationState, SearchState
@@ -75,6 +76,9 @@ def train_and_evaluate(
             seed=config.seed,
             task=config.task,
             verified_reward_type=verified_reward_type_for_evaluator(config.mjwarp_verified_evaluator),
+            rlvr_reward=result["verified_score"],
+            rlvr_reward_type="conservative_verified_return",
+            verified_score=result["verified_score"],
             elapsed_seconds=result["elapsed_seconds"],
             metadata=result["metadata"],
         )
@@ -119,17 +123,45 @@ def train_and_evaluate(
         env.close()
         episode_rewards.append(total_reward)
 
+    stats = conservative_return_stats(episode_rewards)
     return CandidateResult(
         candidate=candidate,
-        mean_reward=float(np.mean(episode_rewards)),
-        std_reward=float(np.std(episode_rewards)),
+        mean_reward=stats["mean_reward"],
+        std_reward=stats["std_reward"],
         episode_rewards=episode_rewards,
         timesteps=config.timesteps,
         seed=config.seed,
         task=config.task,
         verified_reward_type="gym_ant_v5_return",
+        rlvr_reward=stats["verified_score"],
+        rlvr_reward_type="conservative_verified_return",
+        verified_score=stats["verified_score"],
         elapsed_seconds=time.monotonic() - started_at,
+        metadata={
+            "verified_score": stats["verified_score"],
+            "verified_score_std_weight": stats["verified_score_std_weight"],
+            "verified_return_stats": stats,
+            "common_eval_seed_start": config.seed + 10_000,
+            "common_eval_seed_count": config.eval_episodes,
+        },
     )
+
+
+def conservative_return_stats(episode_rewards: list[float], *, std_weight: float = 0.25) -> dict[str, float]:
+    values = np.asarray(episode_rewards, dtype=np.float64)
+    mean = float(np.mean(values))
+    std = float(np.std(values))
+    return {
+        "mean_reward": mean,
+        "std_reward": std,
+        "verified_score": mean - std_weight * std,
+        "verified_score_std_weight": std_weight,
+        "min_reward": float(np.min(values)),
+        "p25_reward": float(np.percentile(values, 25)),
+        "median_reward": float(np.median(values)),
+        "p75_reward": float(np.percentile(values, 75)),
+        "max_reward": float(np.max(values)),
+    }
 
 
 def mjwarp_evaluator_config(config: CandidateEvaluationConfig) -> Any:
@@ -246,13 +278,16 @@ def run_search(
                         "candidate": candidate.name,
                         "status": result.status,
                         "mean_reward": result.mean_reward,
+                        "std_reward": result.std_reward,
+                        "verified_score": result_score(result),
                         "elapsed_seconds": result.elapsed_seconds,
                     },
                 )
                 log_message(
                     output_dir,
                     f"generation {generation} candidate {candidate.name} finished: "
-                    f"status={result.status} mean_reward={result.mean_reward} elapsed_seconds={result.elapsed_seconds}",
+                    f"status={result.status} mean_reward={result.mean_reward} "
+                    f"verified_score={result_score(result)} elapsed_seconds={result.elapsed_seconds}",
                 )
             # A GPU batch is a single durable evaluation transaction.
             persist_search_state(output_dir, config, search_state)
@@ -280,7 +315,7 @@ def run_search(
         search_state.evolution_feedback = format_generation_feedback(generation_results, elite_count)
         best = generation_results[0].candidate
         search_state.best_expression = best.expression
-        search_state.best_score = generation_results[0].mean_reward
+        search_state.best_score = result_score(generation_results[0])
         log_event(
             output_dir,
             "generation_finished",
@@ -411,7 +446,7 @@ def build_mock_offspring(
         result.candidate
         for result in generation_results[: max(1, min(config.eureka_elites, len(generation_results)))]
     ]
-    parent_scores = {result.candidate.name: result.mean_reward for result in generation_results}
+    parent_scores = {result.candidate.name: result_score(result) for result in generation_results}
     candidates = []
     for index in range(config.population):
         parent = parents[index % len(parents)]
@@ -472,6 +507,9 @@ def run_candidates_safely(
                 seed=config.seed,
                 task=config.task,
                 verified_reward_type=verified_reward_type_for_evaluator(config.mjwarp_verified_evaluator),
+                rlvr_reward=row["verified_score"],
+                rlvr_reward_type="conservative_verified_return",
+                verified_score=row["verified_score"],
                 elapsed_seconds=row["elapsed_seconds"],
                 metadata=row["metadata"],
             )

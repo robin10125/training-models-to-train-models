@@ -34,7 +34,7 @@ def add_mjwarp_options(parser: argparse.ArgumentParser, *, include_backend: bool
     )
     parser.add_argument(
         "--mjwarp-base-policy-checkpoint",
-        default="checkpoints/base_ant_mjwarp_policy.pt",
+        default="checkpoints/ant_mjwarp_warm_start_1500.pt",
         help="Path to a pretrained MJWarp Ant PPO checkpoint used when --mjwarp-ppo-init-mode=base.",
     )
     parser.add_argument("--mjwarp-elite-frac", type=float, default=0.1)

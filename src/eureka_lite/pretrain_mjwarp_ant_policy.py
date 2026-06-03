@@ -11,7 +11,7 @@ from .mjwarp_evaluator import MjwarpEvaluatorConfig, pretrain_original_reward_po
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Pretrain one MJWarp Ant PPO base policy with the original reward.")
-    parser.add_argument("--output", type=Path, default=Path("checkpoints/base_ant_mjwarp_policy.pt"))
+    parser.add_argument("--output", type=Path, default=Path("checkpoints/ant_mjwarp_warm_start_1500.pt"))
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda:0")

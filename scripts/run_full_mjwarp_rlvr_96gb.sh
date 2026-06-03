@@ -8,7 +8,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-.venv}"
 MODEL_ID="${MODEL_ID:-deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct}"
 RUN_ROOT="${RUN_ROOT:-runs/deepseek_lite_ant_mjwarp_rlvr}"
-ITERATIONS="${ITERATIONS:-3}"
+ITERATIONS="${ITERATIONS:-20}"
 POPULATION="${POPULATION:-16}"
 GENERATIONS="${GENERATIONS:-3}"
 EUREKA_ELITES="${EUREKA_ELITES:-4}"
@@ -22,9 +22,9 @@ MJWARP_PPO_EPOCHS="${MJWARP_PPO_EPOCHS:-4}"
 MJWARP_PPO_MINIBATCH_SIZE="${MJWARP_PPO_MINIBATCH_SIZE:-16384}"
 MJWARP_PPO_LEARNING_RATE="${MJWARP_PPO_LEARNING_RATE:-3e-4}"
 MJWARP_PPO_INIT_MODE="${MJWARP_PPO_INIT_MODE:-base}"
-MJWARP_BASE_POLICY_CHECKPOINT="${MJWARP_BASE_POLICY_CHECKPOINT:-$RUN_ROOT/base_ant_mjwarp_policy.pt}"
+MJWARP_BASE_POLICY_CHECKPOINT="${MJWARP_BASE_POLICY_CHECKPOINT:-checkpoints/ant_mjwarp_warm_start_1500.pt}"
 MJWARP_BASE_POLICY_ITERATIONS="${MJWARP_BASE_POLICY_ITERATIONS:-96}"
-PRETRAIN_BASE_POLICY="${PRETRAIN_BASE_POLICY:-1}"
+PRETRAIN_BASE_POLICY="${PRETRAIN_BASE_POLICY:-0}"
 FORCE_PRETRAIN_BASE_POLICY="${FORCE_PRETRAIN_BASE_POLICY:-0}"
 MJWARP_ELITE_FRAC="${MJWARP_ELITE_FRAC:-0.1}"
 MJWARP_ROLLOUT_MODE="${MJWARP_ROLLOUT_MODE:-gpu}"
@@ -37,7 +37,7 @@ MJWARP_BATCH_CANDIDATES="${MJWARP_BATCH_CANDIDATES:-1}"
 MJWARP_CUDA_GRAPH="${MJWARP_CUDA_GRAPH:-1}"
 INCLUDE_NEGATIVE_RLVR_SAMPLES="${INCLUDE_NEGATIVE_RLVR_SAMPLES:-1}"
 NEGATIVE_RLVR_MARGIN="${NEGATIVE_RLVR_MARGIN:-1.0}"
-EVAL_EPISODES="${EVAL_EPISODES:-5}"
+EVAL_EPISODES="${EVAL_EPISODES:-32}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
 TOP_P="${TOP_P:-0.95}"
@@ -57,7 +57,7 @@ usage() {
 Usage: ./scripts/run_full_mjwarp_rlvr_96gb.sh [options]
 
 Options:
-  --iterations N              RLVR sample/evaluate/train iterations.
+  --iterations N              RLVR sample/evaluate/train iterations. Default: 20.
   --run-root PATH             Output directory for the iterative run.
   --population N              Reward candidates per iteration.
   --generations N             EUREKA generations per RLVR iteration.
@@ -77,10 +77,12 @@ Options:
                               PPO learning rate.
   --mjwarp-ppo-init-mode NAME base or scratch. Default: base.
   --mjwarp-base-policy-checkpoint PATH
-                              Base policy checkpoint for init mode base.
+                              Base policy checkpoint for init mode base. Default:
+                              checkpoints/ant_mjwarp_warm_start_1500.pt.
   --mjwarp-base-policy-iterations N
                               PPO iterations used to pretrain the base policy. Default: 96.
   --pretrain-base-policy      Train the base policy before running RLVR if needed.
+                              Off by default because the 1500-gate warm start is bundled.
   --force-pretrain-base-policy
                               Retrain the base policy even if the checkpoint exists.
   --cold-start                Use scratch PPO initialization and 96 policy iterations.

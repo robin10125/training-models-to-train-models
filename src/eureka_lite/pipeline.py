@@ -61,7 +61,7 @@ class FullPipelineConfig:
     force_train: bool
     mjwarp_training_episode_horizon: int = 1000
     mjwarp_ppo_init_mode: str = "base"
-    mjwarp_base_policy_checkpoint: str | None = "checkpoints/base_ant_mjwarp_policy.pt"
+    mjwarp_base_policy_checkpoint: str | None = "checkpoints/ant_mjwarp_warm_start_1500.pt"
     mjwarp_verified_audit_gym: bool = False
     mjwarp_verified_audit_max_abs_diff: float | None = None
     mjwarp_reward_backend: str = "eager"
@@ -339,7 +339,7 @@ def parse_args() -> argparse.Namespace:
     add_eureka_options(parser, population_default=16)
     add_mjwarp_options(parser)
     add_negative_sample_options(parser)
-    parser.add_argument("--eval-episodes", type=int, default=5)
+    parser.add_argument("--eval-episodes", type=int, default=16)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda", choices=["auto", "cpu", "cuda"])
     add_generation_options(parser)

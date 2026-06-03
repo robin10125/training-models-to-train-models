@@ -127,7 +127,7 @@ Main experiment flags:
 | `--population` | `16` | Reward programs per EUREKA generation. |
 | `--generations` | `3` | EUREKA generations per RLVR iteration. |
 | `--eureka-elites` | `4` | Elite programs retained for refinement. |
-| `--eval-episodes` | `5` | Verified episodes per candidate. |
+| `--eval-episodes` | `16` in Python CLI, `32` in 96 GB script | Verified episodes per candidate. |
 | `--seed` | `7` | Base random seed. |
 | `--device` | `cuda` | `auto`, `cpu`, or `cuda`. |
 
@@ -145,7 +145,7 @@ MJWarp/Ant flags:
 | `--mjwarp-ppo-minibatch-size` | `16384` | PPO minibatch size. |
 | `--mjwarp-ppo-learning-rate` | `3e-4` | PPO learning rate. |
 | `--mjwarp-ppo-init-mode` | `base` | Shared pretrained `base` or cold-start `scratch`. |
-| `--mjwarp-base-policy-checkpoint` | `checkpoints/base_ant_mjwarp_policy.pt` | Base checkpoint for `base` mode. |
+| `--mjwarp-base-policy-checkpoint` | `checkpoints/ant_mjwarp_warm_start_1500.pt` | Early-locomotion base checkpoint for `base` mode. |
 | `--mjwarp-rollout-mode` | `gpu` | `gpu` or `host`. |
 | `--mjwarp-verified-evaluator` | `mjwarp` | Target `mjwarp` or transfer `gym`. |
 | `--mjwarp-verification-steps` | `1000` | Verified rollout horizon. |
@@ -206,7 +206,7 @@ Base policy pretraining:
 
 ```bash
 python -m eureka_lite.pretrain_mjwarp_ant_policy \
-  --output checkpoints/base_ant_mjwarp_policy.pt \
+  --output checkpoints/ant_mjwarp_warm_start_1500.pt \
   --worlds-per-candidate 4096 \
   --mjwarp-policy-iterations 96
 ```
@@ -259,7 +259,7 @@ candidate-specific shaped rewards and PPO updates.
 Default serious run:
 
 ```bash
-./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20
+./scripts/run_full_mjwarp_rlvr_96gb.sh
 ```
 
 For smoke tests, reduce policy iterations explicitly:
@@ -513,7 +513,7 @@ Pretrain a base policy:
 
 ```bash
 python -m eureka_lite.pretrain_mjwarp_ant_policy \
-  --output checkpoints/base_ant_mjwarp_policy.pt \
+  --output checkpoints/ant_mjwarp_warm_start_1500.pt \
   --worlds-per-candidate 4096 \
   --mjwarp-policy-iterations 96
 ```
@@ -522,14 +522,13 @@ Use default base initialization:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
-  --iterations 20
+  --mjwarp-base-policy-checkpoint checkpoints/ant_mjwarp_warm_start_1500.pt
 ```
 
 Use cold-start reference initialization:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
-  --iterations 20 \
   --cold-start
 ```
 
@@ -579,8 +578,7 @@ Default warm-start run:
 
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
-  --run-root runs/deepseek_lite_ant_mjwarp_rlvr \
-  --iterations 20
+  --run-root runs/deepseek_lite_ant_mjwarp_rlvr
 ```
 
 Cold-start reference run:
@@ -588,7 +586,6 @@ Cold-start reference run:
 ```bash
 ./scripts/run_full_mjwarp_rlvr_96gb.sh \
   --run-root runs/deepseek_lite_ant_mjwarp_rlvr_cold \
-  --iterations 20 \
   --cold-start
 ```
 
@@ -602,5 +599,5 @@ Resume:
 
 ```bash
 rm runs/deepseek_lite_ant_mjwarp_rlvr/PAUSE
-./scripts/run_full_mjwarp_rlvr_96gb.sh --iterations 20
+./scripts/run_full_mjwarp_rlvr_96gb.sh
 ```

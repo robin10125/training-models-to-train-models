@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-episodes", type=int, default=8)
     parser.add_argument("--verification-steps", type=int, default=1000)
     parser.add_argument("--max-hours", type=float, default=12.0)
-    parser.add_argument("--plateau-hours", type=float, default=1.0)
+    parser.add_argument("--plateau-hours", type=float, default=None)
     parser.add_argument("--plateau-tolerance", type=float, default=25.0)
     parser.add_argument("--gate-min-return", type=float, default=2500.0)
     parser.add_argument("--gate-random-margin", type=float, default=1000.0)
@@ -126,7 +126,11 @@ def main() -> None:
         if gate_passed(entry):
             reason = "gate_surpassed"
             break
-        if plateau_or_decrease(history, plateau_window_seconds=args.plateau_hours * 3600.0, tolerance=args.plateau_tolerance):
+        if args.plateau_hours is not None and plateau_or_decrease(
+            history,
+            plateau_window_seconds=args.plateau_hours * 3600.0,
+            tolerance=args.plateau_tolerance,
+        ):
             reason = "plateau_or_decrease_for_window"
             break
 

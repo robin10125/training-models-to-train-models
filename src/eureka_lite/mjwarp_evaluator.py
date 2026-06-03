@@ -55,10 +55,30 @@ class MjwarpEvaluatorConfig:
     normalize_observations: bool = True
     obs_norm_eps: float = 1.0e-5
     ppo_init_mode: str = "base"
-    base_policy_checkpoint: str | None = "checkpoints/base_ant_mjwarp_policy.pt"
+    base_policy_checkpoint: str | None = "checkpoints/ant_mjwarp_warm_start_1500.pt"
     seed: int = 7
     device: str = "cuda:0"
-    eval_episodes: int = 5
+    eval_episodes: int = 16
+
+
+CONSERVATIVE_SCORE_STD_WEIGHT = 0.25
+
+
+def verified_return_stats(returns: list[float] | np.ndarray, *, std_weight: float = CONSERVATIVE_SCORE_STD_WEIGHT) -> dict[str, Any]:
+    values = np.asarray(returns, dtype=np.float64)
+    mean = float(np.mean(values))
+    std = float(np.std(values))
+    return {
+        "mean_reward": mean,
+        "std_reward": std,
+        "verified_score": mean - std_weight * std,
+        "verified_score_std_weight": std_weight,
+        "min_reward": float(np.min(values)),
+        "p25_reward": float(np.percentile(values, 25)),
+        "median_reward": float(np.median(values)),
+        "p75_reward": float(np.percentile(values, 75)),
+        "max_reward": float(np.max(values)),
+    }
 
 
 def validate_verification_audit_config(config: MjwarpEvaluatorConfig) -> None:
@@ -303,9 +323,9 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
             seed=config.seed + 10_000,
         )
     verification_audit = build_verification_audit(eval_returns, audit_returns, config)
+    eval_stats = verified_return_stats(eval_returns)
     return {
-        "mean_reward": float(np.mean(eval_returns)),
-        "std_reward": float(np.std(eval_returns)),
+        **eval_stats,
         "episode_rewards": eval_returns,
         "elapsed_seconds": time.monotonic() - started_at,
         "metadata": {
@@ -323,6 +343,11 @@ def train_and_evaluate_mjwarp(candidate: RewardCandidate, config: MjwarpEvaluato
             **base_policy_metadata(config),
             "rollout_mode": config.rollout_mode,
             "verified_evaluator": config.verified_evaluator,
+            "verified_score": eval_stats["verified_score"],
+            "verified_score_std_weight": eval_stats["verified_score_std_weight"],
+            "verified_return_stats": eval_stats,
+            "common_eval_seed_start": config.seed + 10_000,
+            "common_eval_seed_count": config.eval_episodes,
             "verified_audit": verification_audit,
             "reward_backend": config.reward_backend,
             "candidate_batching": False,
@@ -453,49 +478,56 @@ def train_and_evaluate_mjwarp_batch(
             eval_returns_by_candidate.append(eval_returns)
 
     elapsed_seconds = time.monotonic() - started_at
-    return [
-        {
-            "mean_reward": float(np.mean(eval_returns)),
-            "std_reward": float(np.std(eval_returns)),
-            "episode_rewards": eval_returns,
-            "elapsed_seconds": elapsed_seconds,
-            "metadata": {
-                "sim_backend": "mjwarp",
-                "mjwarp_evaluator": config.evaluator,
-                "worlds_per_candidate": config.worlds_per_candidate,
-                "total_batched_worlds": len(candidates) * config.worlds_per_candidate,
-                "candidate_batching": True,
-                "candidate_batch_size": len(candidates),
-                "episode_steps": config.episode_steps,
-                "training_episode_horizon": config.training_episode_horizon,
-                "policy_iterations": config.policy_iterations,
-                "training_world_steps": config.worlds_per_candidate
-                * config.episode_steps
-                * config.policy_iterations,
-                "ppo_horizon": config.ppo_horizon,
-                "ppo_epochs": config.ppo_epochs,
-                "ppo_minibatch_size": config.ppo_minibatch_size,
-                "ppo_hidden_sizes": [256, 128, 64],
-                **base_policy_metadata(config),
-                "rollout_mode": config.rollout_mode,
-                "verified_evaluator": config.verified_evaluator,
-                "verified_audit": build_verification_audit(
-                    eval_returns,
-                    None if audit_returns_by_candidate is None else audit_returns_by_candidate[index],
-                    config,
-                ),
-                "reward_backend": config.reward_backend,
-                "cuda_graph_requested": config.use_cuda_graph,
-                "cuda_graph_enabled": graph_enabled,
-                "frame_skip": frame_skip,
-                "evaluation_episode_steps": config.verification_steps,
-                "reward_components": reward_programs[index].component_expressions,
-                "best_shaped_return": best_returns[index],
-                "iteration_summaries": summaries[index],
-            },
-        }
-        for index, eval_returns in enumerate(eval_returns_by_candidate)
-    ]
+    rows = []
+    for index, eval_returns in enumerate(eval_returns_by_candidate):
+        eval_stats = verified_return_stats(eval_returns)
+        rows.append(
+            {
+                **eval_stats,
+                "episode_rewards": eval_returns,
+                "elapsed_seconds": elapsed_seconds,
+                "metadata": {
+                    "sim_backend": "mjwarp",
+                    "mjwarp_evaluator": config.evaluator,
+                    "worlds_per_candidate": config.worlds_per_candidate,
+                    "total_batched_worlds": len(candidates) * config.worlds_per_candidate,
+                    "candidate_batching": True,
+                    "candidate_batch_size": len(candidates),
+                    "episode_steps": config.episode_steps,
+                    "training_episode_horizon": config.training_episode_horizon,
+                    "policy_iterations": config.policy_iterations,
+                    "training_world_steps": config.worlds_per_candidate
+                    * config.episode_steps
+                    * config.policy_iterations,
+                    "ppo_horizon": config.ppo_horizon,
+                    "ppo_epochs": config.ppo_epochs,
+                    "ppo_minibatch_size": config.ppo_minibatch_size,
+                    "ppo_hidden_sizes": [256, 128, 64],
+                    **base_policy_metadata(config),
+                    "rollout_mode": config.rollout_mode,
+                    "verified_evaluator": config.verified_evaluator,
+                    "verified_score": eval_stats["verified_score"],
+                    "verified_score_std_weight": eval_stats["verified_score_std_weight"],
+                    "verified_return_stats": eval_stats,
+                    "common_eval_seed_start": config.seed + 10_000,
+                    "common_eval_seed_count": config.eval_episodes,
+                    "verified_audit": build_verification_audit(
+                        eval_returns,
+                        None if audit_returns_by_candidate is None else audit_returns_by_candidate[index],
+                        config,
+                    ),
+                    "reward_backend": config.reward_backend,
+                    "cuda_graph_requested": config.use_cuda_graph,
+                    "cuda_graph_enabled": graph_enabled,
+                    "frame_skip": frame_skip,
+                    "evaluation_episode_steps": config.verification_steps,
+                    "reward_components": reward_programs[index].component_expressions,
+                    "best_shaped_return": best_returns[index],
+                    "iteration_summaries": summaries[index],
+                },
+            }
+        )
+    return rows
 
 
 def pretrain_original_reward_policy(config: MjwarpEvaluatorConfig, output_path: str | Path) -> dict[str, Any]:
