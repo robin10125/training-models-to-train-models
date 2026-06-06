@@ -64,12 +64,17 @@ Each RLVR iteration contains multiple EUREKA generations. In each generation:
 5. Elites, lower-ranked examples, source context, reward components, verified
    scores, and policy diagnostics are fed into the next generation prompt.
 
-Prompts include reward-relevant Ant source excerpts, the task adapter, and the
-local MJWarp reward/evaluation code. The model is asked for named reward
-components such as:
+Prompts include a general Ant task description, source excerpts for environment
+mechanics, the allowed generated-reward interface, and prior-generation
+feedback. They intentionally exclude the original Ant reward formula and the
+local MJWarp verified-reward implementation so the model does not receive the
+answer key as prompt context. The Ant task description follows the public
+EUREKA Ant config: "to make the ant run forward as fast as possible."
+
+The model is asked for named reward components such as:
 
 ```python
-{"forward": "x_velocity", "healthy": "survive_reward", "control": "-0.01 * action_l2"}
+{"progress": "x_velocity", "stability": "1.0 if healthy else -1.0", "effort": "-0.01 * action_l2"}
 ```
 
 The evaluator validates each component, sums the components for PPO training,

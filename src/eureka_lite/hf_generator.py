@@ -9,12 +9,23 @@ from typing import Any
 import torch
 from gymnasium.envs.mujoco.ant_v5 import AntEnv
 
-from .adapters import ANT_TASK, AntAdapter, get_adapter
-from . import mjwarp_evaluator
+from .adapters import ANT_TASK, get_adapter
 from .rewards import RewardCandidate, RewardExpression, total_expression_from_components, validate_component_expressions
 
 
 DEFAULT_HF_MODEL_ID = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+ANT_TASK_DESCRIPTION = "to make the ant run forward as fast as possible"
+ANT_GENERATIVE_REWARD_VARIABLES = frozenset(
+    {
+        "x_velocity",
+        "y_velocity",
+        "torso_z",
+        "action_l2",
+        "healthy",
+        "terminated",
+        "truncated",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -113,13 +124,14 @@ class HfRewardGenerator:
         evolution_feedback: str | None = None,
     ) -> RewardCandidate:
         adapter = get_adapter(task)
+        reward_variables = generation_reward_variables(task)
         prompt = ""
         last_error: Exception | None = None
         eureka_feedback = evolution_feedback or format_eureka_feedback(elites)
         for attempt in range(3):
             prompt = build_reward_prompt(
                 task=task,
-                reward_variables=sorted(adapter.reward_variables),
+                reward_variables=sorted(reward_variables),
                 best_expression=best_expression,
                 best_score=best_score,
                 elites=elites,
@@ -148,8 +160,8 @@ class HfRewardGenerator:
             try:
                 component_expressions = extract_reward_components(completion_text)
                 expression = total_expression_from_components(component_expressions, "")
-                validate_component_expressions(component_expressions, adapter.reward_variables)
-                RewardExpression(expression, adapter.reward_variables)
+                validate_component_expressions(component_expressions, reward_variables)
+                RewardExpression(expression, reward_variables)
             except ValueError as exc:
                 last_error = exc
                 self._rejected_candidates.append(
@@ -264,13 +276,12 @@ def build_reward_prompt(
         f"Design one dense reward expression for {task}.\n"
         "Return only a Python dictionary literal mapping reward component names to Python expression strings. "
         "Do not return a function, markdown, comments, or explanation. Example:\n"
-        "{\"forward\": \"x_velocity\", \"upright\": \"0.5 * survive_reward\", \"control\": \"-0.01 * action_l2\"}\n"
+        "{\"progress\": \"x_velocity\", \"stability\": \"1.0 if healthy else -1.0\", \"effort\": \"-0.01 * action_l2\"}\n"
         f"{task_prompt_context(task)}\n"
         "The expression will be parsed with Python ast and may only use numeric operators, conditionals, "
         "comparisons, abs, min, max, sqrt, sin, cos, tanh, exp, and these variables:\n"
         f"{', '.join(reward_variables)}\n"
         "The component expressions will be summed to train PPO. They will be scored only by verified target-environment return, not by their own value.\n"
-        "Prefer forward progress, stable healthy locomotion, low lateral drift, and modest control cost.\n"
         f"{feedback}"
         f"{retry}"
     )
@@ -281,35 +292,30 @@ def task_prompt_context(task: str) -> str:
         raise ValueError(f"Unsupported task for prompt context: {task}")
     return (
         "Task context:\n"
-        "- The agent is a MuJoCo Ant quadruped. The policy controls 8 continuous joint torques.\n"
-        "- The target behavior is fast, stable forward locomotion in +x without falling.\n"
-        "- `x_velocity` and `forward_reward` are forward progress terms; larger positive values are better.\n"
-        "- `y_velocity` is lateral drift and is usually something to penalize by magnitude.\n"
-        "- `torso_z` is torso height. Healthy Ant height is approximately in [0.2, 1.0], with useful walking often around 0.5-0.8.\n"
-        "- `action_l2` is squared action magnitude. `control_cost` is the environment action penalty, approximately 0.005 * action_l2.\n"
-        "- `survive_reward` is 1.0 while healthy. `healthy` is false when the ant falls or becomes invalid.\n"
-        "- `original_reward = forward_reward + survive_reward - control_cost` is used only for final verification.\n"
-        "- Your generated expression trains the policy, but model reward is assigned from the final verified target-environment return.\n"
-        "- Avoid rewarding large sideways velocity, falling, excessive action, or gaming `original_reward` without locomotion.\n"
+        f"- Description: {ANT_TASK_DESCRIPTION}.\n"
+        "- The agent is a MuJoCo Ant quadruped controlled by continuous joint torques.\n"
+        "- Your generated expression trains the policy, but model reward is assigned from final verified target-environment performance.\n"
         f"{source_context()}"
     )
 
 
 def source_context() -> str:
-    adapter_source = inspect.getsource(AntAdapter)
     gym_source = "\n".join(
         inspect.getsource(getattr(AntEnv, method_name))
-        for method_name in ("step", "_get_rew", "_get_obs", "reset_model")
+        for method_name in ("step", "_get_obs", "reset_model")
     )
-    reward_source = inspect.getsource(mjwarp_evaluator.ant_rewards)
     return (
         "\nEnvironment source code excerpt:\n"
         "```python\n"
         f"{gym_source}\n"
-        f"{adapter_source}\n"
-        f"{reward_source}\n"
         "```\n"
     )
+
+
+def generation_reward_variables(task: str) -> frozenset[str]:
+    if task != ANT_TASK:
+        raise ValueError(f"Unsupported task for reward generation: {task}")
+    return ANT_GENERATIVE_REWARD_VARIABLES
 
 
 def format_eureka_feedback(elites: list[dict[str, Any]] | None) -> str | None:

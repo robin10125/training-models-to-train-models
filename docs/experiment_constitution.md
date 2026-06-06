@@ -69,6 +69,10 @@ training data than another unless the run is explicitly marked as an ablation.
 The inner loop must remain EUREKA-style evolutionary reward search:
 
 - prompt context includes relevant Ant/task/source information;
+- prompt context must not expose the original Ant reward formula or verified
+  reward implementation as an answer key;
+- the base Ant task description is: "to make the ant run forward as fast as
+  possible";
 - candidates are ranked by verified target-environment return;
 - elites and lower-ranked examples are available as feedback;
 - reflection/evolution feedback is used for later generations;

@@ -6,6 +6,7 @@ from eureka_lite.hf_generator import (
     build_reward_prompt,
     extract_reward_components,
     extract_reward_expression,
+    generation_reward_variables,
     token_logprobs,
 )
 
@@ -29,21 +30,23 @@ class HfGeneratorHelperTests(unittest.TestCase):
     def test_build_reward_prompt_names_variables(self) -> None:
         prompt = build_reward_prompt(
             task="Ant-v5",
-            reward_variables=["action_l2", "survive_reward", "x_velocity"],
+            reward_variables=["action_l2", "healthy", "x_velocity"],
             best_expression="x_velocity",
             best_score=10.0,
         )
         self.assertIn("Ant-v5", prompt)
         self.assertIn("action_l2", prompt)
+        self.assertIn("to make the ant run forward as fast as possible", prompt)
         self.assertIn("Current best reward expression", prompt)
         self.assertIn("Task context", prompt)
         self.assertIn("Environment source code excerpt", prompt)
-        self.assertIn("original_reward = forward_reward + survive_reward - control_cost", prompt)
+        self.assertNotIn("original_reward = forward_reward + survive_reward - control_cost", prompt)
+        self.assertNotIn("Prefer forward progress", prompt)
 
     def test_build_reward_prompt_includes_eureka_elites(self) -> None:
         prompt = build_reward_prompt(
             task="Ant-v5",
-            reward_variables=["action_l2", "survive_reward", "x_velocity"],
+            reward_variables=["action_l2", "healthy", "x_velocity"],
             best_expression="x_velocity",
             best_score=10.0,
             elites=[{"name": "elite_0", "expression": "x_velocity", "score": 10.0}],
@@ -54,7 +57,7 @@ class HfGeneratorHelperTests(unittest.TestCase):
     def test_build_reward_prompt_prefers_evolution_feedback(self) -> None:
         prompt = build_reward_prompt(
             task="Ant-v5",
-            reward_variables=["action_l2", "survive_reward", "x_velocity"],
+            reward_variables=["action_l2", "healthy", "x_velocity"],
             best_expression="x_velocity",
             best_score=10.0,
             elites=[{"name": "elite_0", "expression": "x_velocity", "score": 10.0}],
@@ -62,6 +65,15 @@ class HfGeneratorHelperTests(unittest.TestCase):
         )
         self.assertIn("EUREKA evolutionary feedback", prompt)
         self.assertIn("verified_return=10.0", prompt)
+
+    def test_generation_reward_variables_hide_original_reward_components(self) -> None:
+        variables = generation_reward_variables("Ant-v5")
+        self.assertIn("x_velocity", variables)
+        self.assertIn("healthy", variables)
+        self.assertNotIn("original_reward", variables)
+        self.assertNotIn("forward_reward", variables)
+        self.assertNotIn("control_cost", variables)
+        self.assertNotIn("survive_reward", variables)
 
     def test_token_logprobs_matches_generated_tokens(self) -> None:
         import torch
